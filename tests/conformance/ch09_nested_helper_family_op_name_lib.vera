@@ -1,0 +1,24 @@
+-- Conformance: module with a private helper named like an effect op, for the
+-- nested-helper-family shape (Chapter 9, #1299)
+-- Tests: the same invisible-declaration premise as
+-- ch07_invisible_import_op_name_lib, kept separate because the importer here
+-- exercises the discovery LEAF under a generic's `where` family rather than
+-- the dispatch gates.  `@Bool` so a clone named from this declaration's
+-- return type differs from one named from the importer's `State<Int>` cell.
+module ch09_nested_helper_family_op_name_lib;
+
+private fn get(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  true
+}
+
+public fn touch(@Unit -> @Bool)
+  requires(true)
+  ensures(@Bool.result == true)
+  effects(pure)
+{
+  get(())
+}

@@ -1,0 +1,15 @@
+-- Conformance: bare call to a dependency's generic (Chapter 8, #1281)
+-- Tests: this module declares no generic at all, so its bare `gen` is the one
+-- it imports.  Its sibling declares a `gen` of its own; before #1281 the pair
+-- was refused outright with [E608].
+module ch08_module_generic_diamond_mid2;
+
+import ch08_module_generic_diamond_base;
+
+public fn door2(@Bool -> @Int)
+  requires(true)
+  ensures(@Int.result == 111)
+  effects(pure)
+{
+  gen(@Bool.0)
+}

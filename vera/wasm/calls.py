@@ -5,6 +5,7 @@ from __future__ import annotations
 from vera import ast
 from vera.monomorphize import Monomorphizer, resolve_fn_type_alias
 from vera.skip import CodegenSkip
+from vera.slots import bare_call_denotes_user_fn
 from vera.wasm.helpers import WasmSlotEnv
 
 
@@ -29,18 +30,33 @@ class CallsMixin:
     """
 
     def _translate_call(
-        self, call: ast.FnCall, env: WasmSlotEnv
+        self, call: ast.FnCall, env: WasmSlotEnv,
+        *, denotes_op: bool | None = None,
     ) -> list[str] | None:
         """Translate a function call to WASM call instruction.
 
         If the call name matches an effect operation (e.g. get/put for
         State<T>), redirects to the corresponding host import.
+
+        *denotes_op* overrides the bare-call ownership question (#1284) for
+        a call this dispatcher did not receive bare.  ``None`` — every
+        ordinary ``ast.FnCall`` — asks :meth:`_bare_call_denotes_op`.
+        ``True`` is for the QUALIFIED spellings that delegate here by
+        synthesizing a bare node (``State.get``/``State.put``/``Exn.throw``,
+        below): the qualifier already named the effect, so no user
+        declaration can shadow it and the synthesized node must not be
+        re-asked as if the user had written the bare form.
         """
         # Built-in intrinsics — only when no user-defined function
         # with the same name exists.  User definitions take priority
         # so that e.g. a user-defined length(@List<Int> -> @Nat) is
-        # not mistakenly compiled as the array-length built-in.
-        if call.name not in self._known_fns:
+        # not mistakenly compiled as the array-length built-in.  Same
+        # ownership rule the effect-op dispatch below applies, over the
+        # same table (#1284); spelled through the shared predicate so a
+        # change to the rule reaches both.  The table is the LEXICAL one
+        # (#1299) — an intrinsic must not be displaced by a declaration
+        # this call site cannot see, any more than an operation must.
+        if not bare_call_denotes_user_fn(call.name, self._scoped_fns):
             if call.name == "array_length" and len(call.args) == 1:
                 return self._translate_array_length(call.args[0], env)
             if call.name == "string_length" and len(call.args) == 1:
@@ -432,19 +448,37 @@ class CallsMixin:
         if call.name == "apply_fn" and len(call.args) >= 2:
             return self._translate_apply_fn(call, env)
 
-        # #1233: inside an inlined clause body, an outward-routed op of the
-        # SAME cell family cannot address the enclosing cell — the intrinsics
-        # only reach the innermost cell of a family.  Refuse it here, before
-        # either dispatch below picks a route, so both the clause-inline and
-        # the bare-import path are covered by one gate (and so is the
-        # qualified `State.get`/`State.put` spelling, which delegates here).
-        self._reject_unaddressable_clause_op(call)
+        # #1284: whose declaration this call site names, asked ONCE and
+        # consumed by every op route below.  The op registries are keyed by
+        # op NAME and say which cell that name reaches; they do NOT say
+        # whether this call is the operation at all, and reading them as if
+        # they did is the defect: a program declaring `fn get` had its
+        # ordinary calls lowered to the host cell intrinsic under any
+        # enclosing `handle[State<T>]` — a silently wrong value, a module
+        # WASM validation rejected, or a spurious [E602] naming a State
+        # operation the source never contained.  The checker resolved every
+        # one of those call sites to the user's declaration (E201/E202
+        # report against the user's signature), so this is that answer.
+        if denotes_op is None:
+            denotes_op = self._bare_call_denotes_op(call.name)
 
-        # #976 option C: a get/put under a handle with registered clauses
-        # inlines the clause body at the call site (intrinsic-hybrid
-        # semantics) instead of the bare host-cell call below.
-        if call.name in self._state_clause_ops:
-            return self._translate_state_clause_op(call, env)
+        if denotes_op:
+            # #1233: inside an inlined clause body, an outward-routed op of
+            # the SAME cell family cannot address the enclosing cell — the
+            # intrinsics only reach the innermost cell of a family.  Refuse
+            # it here, before either dispatch below picks a route, so both
+            # the clause-inline and the bare-import path are covered by one
+            # gate (and so is the qualified `State.get`/`State.put`
+            # spelling, which delegates here).  Gated on ownership with the
+            # dispatch it guards: a user function's call reaches no cell, so
+            # asking whether it can address one refused compilable programs.
+            self._reject_unaddressable_clause_op(call)
+
+            # #976 option C: a get/put under a handle with registered clauses
+            # inlines the clause body at the call site (intrinsic-hybrid
+            # semantics) instead of the bare host-cell call below.
+            if call.name in self._state_clause_ops:
+                return self._translate_state_clause_op(call, env)
         # Inside an inlined State clause, resume(v)'s value IS the op's
         # result at the original call site (single-shot, tail position —
         # enforced before inlining).  resume(()) is a UnitLit: no value,
@@ -461,7 +495,7 @@ class CallsMixin:
             return self.translate_expr(call.args[0], env)
 
         # Check if this is an effect operation (e.g. get/put/throw)
-        if call.name in self._effect_ops:
+        if denotes_op and call.name in self._effect_ops:
             target_name, _is_void = self._effect_ops[call.name]
             instructions: list[str] = []
             # #747: the effect-op-argument @Int -> @Nat narrowing is in
@@ -503,8 +537,9 @@ class CallsMixin:
             # not — while an int literal defaults to `i64.const`, so
             # `throw(5)` into `Exn<{ @Byte | … }>` emitted a module WASM
             # validation rejects at load.  Same marking, same derivation,
-            # different op; the #1268 narrowing GUARD on this payload is a
-            # separate obligation and is deliberately NOT added here.
+            # different op — and, since #1268, the same narrowing GUARDS
+            # below: the payload is a write boundary in the full sense, not
+            # only in its width.
             is_exn_throw = (
                 call.name == "throw" and len(call.args) == 1
                 and cell is not None
@@ -544,7 +579,38 @@ class CallsMixin:
                 if arg_instrs is None:
                     return None
                 instructions.extend(arg_instrs)
-            if is_state_put:
+            # The write boundary's guards.  `throw` joined `put` here in
+            # #1268: its payload narrows into the `Exn<E>` slot exactly as
+            # `put`'s argument narrows into the cell, but it crossed no
+            # function boundary, so none of §2.6.5's composing guards covered
+            # it — `throw(0 - 5)` into an `Exn<Nat>` ran to completion and
+            # handed `-5` to a clause that had assumed non-negativity, and a
+            # `@Nat`-typed consumer's Tier-1-PROVED `ensures` then failed at
+            # run time.  The three arms mirror the verifier's
+            # `_obligate_binding_triple` one-for-one, refined FIRST for the
+            # same reason it is: the refinement's own predicate carries the
+            # base's implicit range (`_refinement_guard_parts` conjoins it),
+            # so the sign guards would be redundant under it, and running
+            # them instead of it would check `>= 0` where the boundary
+            # invariant is `> 0`.
+            refined_payload: ast.TypeExpr | None = None
+            if is_exn_throw and cell is not None:
+                refined_payload = self._refined_exn_payload_type(cell, call)
+                if refined_payload is not None:
+                    instructions = self._emit_exn_payload_refine_guard(
+                        instructions, refined_payload, cell, call, env)
+                    # #820 INTERSECTION (PR #1325 review): the predicate does
+                    # not imply fit-in-i64, so a refinement OVER `@Int` keeps
+                    # the widening guard BESIDE its predicate guard rather
+                    # than replacing it.  Without this, adding a refinement
+                    # weakened the boundary: `Exn<Int>` fed a @Nat of u64.MAX
+                    # trapped, `Exn<{ @Int | true }>` returned -1.  The
+                    # verifier's `_obligate_binding_triple` records the pair
+                    # in the same shape, so obligation and guard still match
+                    # one-for-one.
+                    if base == "Int" and self._result_is_nat(call.args[0]):
+                        instructions = self._emit_int_widen_guard(instructions)
+            if refined_payload is None and (is_state_put or is_exn_throw):
                 if base == "Nat" and self._narrows_into_nat(call.args[0]):
                     instructions = self._emit_nat_bind_guard(instructions)
                 elif base == "Int" and self._result_is_nat(call.args[0]):
@@ -672,16 +738,22 @@ class CallsMixin:
             # `with` transform, stored a negative into a @Nat cell
             # silently, and emitted a Byte literal at i64 (round-4
             # review).  Delegation makes the two spellings identical by
-            # construction — but ONLY when the dispatcher will actually
-            # resolve the op: in a delegated fn where a user function
-            # shadows the name, `_compile_fn` skips the effect_ops
-            # mapping and the synthesized bare call would silently
-            # dispatch to the USER fn (round-5 review) — the unresolved
-            # case falls through to the legacy path's loud
-            # unknown-func failure instead.
+            # construction — guarded on the op resolving, so a row that
+            # registered no State cell still falls through to the legacy
+            # path's loud unknown-func failure.
+            #
+            # `denotes_op=True` (#1284): the qualifier NAMED the effect, so
+            # this call site is the operation whatever the program's
+            # declarations are called.  Without it, the synthesized bare
+            # node would be re-asked the ownership question and, in a
+            # program that also declares `fn get`, silently dispatch to the
+            # user's function — the round-5 hazard, which the pre-#1284
+            # `_fn_sigs` registry guard sidestepped only by making the
+            # registry incomplete (and so failing this spelling loudly at
+            # the declared-row site: `unknown func: $vera.get`).
             return self._translate_call(
                 ast.FnCall(name=call.name, args=call.args, span=call.span),
-                env,
+                env, denotes_op=True,
             )
         if (call.qualifier == "Exn" and call.name == "throw"
                 and "throw" in self._effect_ops):
@@ -692,9 +764,10 @@ class CallsMixin:
             # compiled.  Guarded on the op resolving, same as the State
             # twin — an unresolved `throw` falls through to the legacy path
             # below rather than synthesizing a bare call that would miss.
+            # `denotes_op=True` for the same reason as the State twin.
             return self._translate_call(
                 ast.FnCall(name=call.name, args=call.args, span=call.span),
-                env,
+                env, denotes_op=True,
             )
         instructions: list[str] = []
         for arg in call.args:

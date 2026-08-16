@@ -38,6 +38,77 @@ from vera.transform import transform
 _CALL_INDIRECT_RE = re.compile(r"(?m)^\s*call_indirect\b")
 _TABLE_DECL_RE = re.compile(r"(?m)^\s*\(table\b")
 
+# Characters that may continue a WAT symbol name in emitted Vera output:
+# identifiers, the `$` of a mangled clone suffix, and the `.` of a host
+# import (`$vera.state_get_Int`).
+_WAT_NAME_TAIL = r"(?![0-9A-Za-z_$.])"
+
+
+def wat_calls(wat: str, symbol: str) -> bool:
+    """Does *wat* contain a call to EXACTLY ``$symbol``?
+
+    A plain ``"call $get" in wat`` is a prefix test, so it also accepts
+    ``call $getx`` — and, worse, ``call $get$Int``, which is what a
+    monomorphized clone of a same-named generic would emit.  In the
+    positive direction that is a false PASS: the assertion says "the user's
+    function was called" while the module called something else whose name
+    merely starts the same way.  Anchoring on a name-character boundary
+    makes the assertion mean what it reads as.
+
+    Matches the tail-call spelling too: ``return_call $get`` contains
+    ``call $get``, and both are calls to the same target, so a test that
+    pins a dispatch target must not go red just because TCO fired.
+    """
+    return re.search(
+        rf"call \${re.escape(symbol)}{_WAT_NAME_TAIL}", wat,
+    ) is not None
+
+
+def wat_fn_body(wat: str, name: str) -> str:
+    """The emitted ``(func $name …)`` block, alone.
+
+    :func:`wat_calls` over a whole module answers "does ANY body call this?",
+    which is the wrong question whenever the property under test is
+    per-function — a scope rule, most obviously (#1299): a module's own body
+    may legitimately call its private ``$get`` in the same WAT where the
+    importer's body must not.  A module-wide assertion cannot separate those
+    two, and reads as if it had.
+
+    Raises rather than returning ``""`` for an absent function: an empty
+    string makes every ``not wat_calls(...)`` assertion pass vacuously, which
+    is precisely the failure this helper exists to prevent.
+    """
+    match = re.search(
+        rf"(?m)^\s*\(func \${re.escape(name)}{_WAT_NAME_TAIL}", wat,
+    )
+    if match is None:
+        raise AssertionError(
+            f"no `(func ${name} …)` in the emitted WAT — the function was "
+            f"never emitted, so an assertion about its body would be vacuous"
+        )
+    rest = wat[match.end():]
+    nxt = re.search(r"(?m)^\s*\(func \$", rest)
+    return wat[match.start():match.end() + (nxt.start() if nxt else len(rest))]
+
+
+def wat_fn_names(wat: str) -> list[str]:
+    """Every function symbol the module DEFINES, sorted.
+
+    Membership against this list is exact, where ``"(func $f" in wat`` is a
+    prefix test that a longer mangled symbol satisfies — ``$gsib$Int`` is
+    matched by a check for ``$gsib``, and ``$gen$Bool`` by one for ``$gen``,
+    which is precisely how a monomorphized clone impersonates another.  It
+    also makes a failure message useful: the assertion can print what WAS
+    emitted instead of only what was missing.
+
+    Imports are excluded — ``(import … (func $vera.x …))`` is not a
+    definition, and a test asking "did we emit this?" never means the host's.
+    """
+    return sorted(
+        m.group(1)
+        for m in re.finditer(r"(?m)^\s*\(func \$([^\s()]+)", wat)
+    )
+
 
 def exceptions_engine() -> wasmtime.Engine:
     """A wasmtime engine configured the way ``execute()`` configures its own.

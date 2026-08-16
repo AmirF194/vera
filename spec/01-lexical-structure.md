@@ -51,7 +51,7 @@ A label written on a **function parameter** or on the **return slot** is preserv
 
 ## 1.4 Keywords
 
-The following identifiers are reserved keywords and MUST NOT be used as type names or function names:
+The following identifiers are reserved keywords and MUST NOT be used as function names:
 
 <!-- vera:skip-parse category="FRAGMENT" reason="'fn  let  if  then ...'" -->
 ```
@@ -60,10 +60,17 @@ match       data        type        module      import
 public      private     requires    ensures     invariant
 decreases   assert      assume      effect      handle
 resume      with        in          forall      exists
-where       true        false       pure
+where       true        false       pure        ability
+effects     op          old         new         result
 ```
 
-`handle` is the one exception, and only for function names: `public fn handle(@Request -> @Response)` is the entry point a *host* invokes under `vera serve` and `wasi:http` (Chapter 9, Section 9.5.6), so a function of that name is not dead code and stays legal. A future host-invoked entry point is exempted on the same grounds; nothing else is. Chapter 5, Section 5.2 gives the full reasoning and the **E153** rule.
+The reservation is enforced by **E153** at the declaration, and the compiler derives the list above from the grammar itself rather than from a second hand-maintained copy, so a keyword cannot be reserved in this chapter and admitted by the checker. `resume` is the one entry that is not a grammar keyword; it is reserved on separate grounds, given in Chapter 5, Section 5.2.
+
+The restriction is on function names alone. Type names cannot collide with a keyword in the first place: every type-namespace binder in the grammar — data types, type aliases, constructors, effects, abilities, and `forall` type parameters — is an `UPPER_IDENT`, and every keyword is lowercase, so `data with` is refused as a malformed type name rather than as a reserved one.
+
+The restriction is also on the whole identifier, not on a prefix: `older`, `renew`, `matched`, `with_it` and `then_value` are ordinary function names.
+
+`handle` is the one exception. `public fn handle(@Request -> @Response)` is the entry point a *host* invokes under `vera serve` and `wasi:http` (Chapter 9, Section 9.5.6), so a function of that name is not dead code and stays legal. A future host-invoked entry point is exempted on the same grounds; nothing else is. Chapter 5, Section 5.2 gives the full reasoning and the **E153** rule.
 
 ## 1.5 Operators and Punctuation
 

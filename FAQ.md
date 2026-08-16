@@ -170,9 +170,9 @@ vera compile --target browser examples/hello_world.vera
 #   index.html
 ```
 
-Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of all Vera host bindings: `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and all other operations (State, contracts, Markdown) work identically to the wasmtime runtime, with two documented exceptions: `json_stringify` ([#1293](https://github.com/aallan/vera/issues/1293)) and `md_render` ([#1294](https://github.com/aallan/vera/issues/1294)) still differ between the two hosts.
+Serve it with any HTTP server and open `index.html` — no build step, no bundler, no dependencies. The JavaScript runtime provides browser-appropriate implementations of the host bindings the browser target supports — the ones a page can host, which leaves a filesystem, an accept loop, a database and a model provider outside it by construction (spec §12.9.3 lists each and why): `IO.print` writes to the page, `IO.read_line` uses `prompt()`, and State, contracts, JSON serialization and Markdown rendering work identically to the wasmtime runtime. `json_stringify` and `md_render` reach that identity by emitting a canonical form the specification states — §9.7.1 and §9.7.3 — rather than by the two hosts happening to agree, which is what the parity suite checks them against. `json_parse` reaches it from the other side, by accepted domain rather than by output form: §9.7.1 states what it takes — RFC 8259-valid text that decodes to finite numbers and strings of Unicode scalar values — so the JavaScript constants (`NaN`, `Infinity`, `-Infinity`) and a lone-surrogate escape are `Err` at the parse on both hosts, with one message, and every text inside the domain parses identically. `md_parse` is the one operation on the shared surface still to reach parity: the two hand-written parsers disagree across nine measured classes of input the §9.7.3 subset leaves open, the largest by a wide margin being how a paragraph's plain-text runs are grouped — invisible to `md_render`, since the runs concatenate to the same text — and the rest render-visible, from how emphasis markers are scanned to block markers such as a `+` bullet or a list nested more than two deep. That one is tracked as [#1301](https://github.com/aallan/vera/issues/1301). `IO.read_char` is separately not yet supported in the browser target at all, and is a not-yet rather than one of the boundaries above — a page could host it, and until the JSPI suspend/resume primitive it needs lands the stub returns an explanatory `Err` reading `IO.read_char not yet supported in browser target`.
 
-Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary, not a divergence awaiting a fix like the two above; spec §9.5.5 states it for `Inference`.
+Two effects are refused outright rather than merely differing. `Inference` and `DB` return an explanatory `Err` from every operation in the browser, because the API key or database credential they would need is readable from page source and network traffic in client-side JavaScript. Reach them through a server-side endpoint and call it with `Http`, which does run in the browser — it is backed by `XMLHttpRequest`, not a stub. That refusal is a deliberate platform boundary; spec §9.5.5 states it for `Inference`.
 
 The runtime also works in Node.js:
 
@@ -180,7 +180,7 @@ The runtime also works in Node.js:
 node --experimental-wasm-exnref vera/browser/harness.mjs module.wasm
 ```
 
-Mandatory parity tests enforce that on every PR — except for the two divergences above, where each runtime's exact output is pinned separately so a fix goes red rather than passing unnoticed.
+Mandatory parity tests enforce that on every PR. For the two operations that carry a canonical form, each case asserts the expected string as well as cross-host equality, since two hosts agreeing on a wrong answer would satisfy equality on its own; for the two parsers it covers the inputs the implementations do agree on — every well-formed JSON document, and the Markdown shapes outside [#1301](https://github.com/aallan/vera/issues/1301)'s nine classes — so a regression on one of those goes red.
 
 
 ## How does contract-driven testing work?
@@ -236,7 +236,7 @@ None of this is Vera-specific, but it validates the design choices. The thesis i
 
 This is a real concern. LLMs are trained on trillions of tokens of Python, TypeScript, and JavaScript. A MojoBench study (NAACL 2025) found that even fine-tuned models achieved only 30–35% improvement over base models on Mojo code generation, illustrating the cold-start problem for new languages.
 
-Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (214 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
+Vera's approach has three parts. First, the agent-facing documentation (SKILL.md) is designed to be dropped into a model's context window, so the model works from the language specification rather than training data recall. Second, Vera's syntax is deliberately simple and regular — fewer constructs, each with exactly one canonical form — which reduces the surface area a model needs to learn. Third, the conformance test suite (244 programs covering every language feature) gives models concrete examples to learn from and conform to. Simon Willison's December 2025 JustHTML write-up illustrates the same point in practice: an LLM-assisted implementation, guided by the html5lib conformance suite, conformed to the HTML parsing spec by running against its tests — a comprehensive test suite is a strong scaffold for a model implementing to a specification.
 
 
 ## How does Vera compare to Dafny / Lean / Koka / F*?
@@ -279,7 +279,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 10,486 tests, including a 214-program conformance suite
+- 11,969 tests, including a 244-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

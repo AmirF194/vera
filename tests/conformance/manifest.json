@@ -963,6 +963,20 @@
     ]
   },
   {
+    "id": "ch05_reserved_contextual_keyword_fn_rejected",
+    "file": "ch05_reserved_contextual_keyword_fn_rejected.vera",
+    "chapter": 5,
+    "title": "A function named after a contextual grammar keyword is a checker error (#1296)",
+    "level": "check",
+    "spec_ref": "Section 5.2",
+    "expected_error": "E153",
+    "features": [
+      "reserved_fn_name",
+      "function_declaration",
+      "check_error"
+    ]
+  },
+  {
     "id": "ch05_reserved_resume_fn_rejected",
     "file": "ch05_reserved_resume_fn_rejected.vera",
     "chapter": 5,
@@ -1322,6 +1336,37 @@
       "handler_clause",
       "state_effect",
       "state_update"
+    ]
+  },
+  {
+    "id": "ch07_op_name_user_shadow",
+    "file": "ch07_op_name_user_shadow.vera",
+    "chapter": 7,
+    "title": "A bare call names a declaration before an operation",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "state_effect",
+      "handler",
+      "nested_handlers",
+      "qualified_op",
+      "get",
+      "put"
+    ]
+  },
+  {
+    "id": "ch07_state_new_family",
+    "file": "ch07_state_new_family.vera",
+    "chapter": 7,
+    "title": "new(State<T>) names its cell, like old(State<T>)",
+    "level": "run",
+    "spec_ref": "Section 7.3.3",
+    "features": [
+      "state_effect",
+      "new_state",
+      "old_state",
+      "type_alias",
+      "handler"
     ]
   },
   {
@@ -1844,7 +1889,7 @@
     "chapter": 9,
     "title": "Json ADT and json_* built-in functions",
     "level": "run",
-    "spec_ref": "Section 9.4.4",
+    "spec_ref": "Section 9.7.1",
     "features": [
       "Json",
       "JNull",
@@ -1861,6 +1906,24 @@
       "json_keys",
       "json_has_field",
       "json_type"
+    ]
+  },
+  {
+    "id": "ch09_json_accept_domain",
+    "file": "ch09_json_accept_domain.vera",
+    "chapter": 9,
+    "title": "json_parse's accepted domain (#1306, #1308)",
+    "level": "run",
+    "spec_ref": "Section 9.7.1",
+    "features": [
+      "json_parse",
+      "json_accept_domain",
+      "non_finite_constant_rejected",
+      "non_finite_overflow_rejected",
+      "integer_overflow_rejected",
+      "lone_surrogate_rejected",
+      "surrogate_pair_accepted",
+      "finite_boundary_accepted"
     ]
   },
   {
@@ -2803,6 +2866,62 @@
     ]
   },
   {
+    "id": "ch09_invisible_import_ability_op_lib",
+    "file": "ch09_invisible_import_ability_op_lib.vera",
+    "chapter": 9,
+    "title": "Module with a private helper named after an ability op",
+    "level": "verify",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "cross_module",
+      "visibility",
+      "ability_operation"
+    ]
+  },
+  {
+    "id": "ch09_invisible_import_ability_op",
+    "file": "ch09_invisible_import_ability_op.vera",
+    "chapter": 9,
+    "title": "Ability op beside an invisible same-named import",
+    "level": "run",
+    "spec_ref": "Section 9.8",
+    "features": [
+      "cross_module",
+      "visibility",
+      "ability_operation",
+      "bare_call"
+    ]
+  },
+  {
+    "id": "ch09_nested_helper_family_op_name_lib",
+    "file": "ch09_nested_helper_family_op_name_lib.vera",
+    "chapter": 9,
+    "title": "Module with a private op-named helper, for the family shape",
+    "level": "verify",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation"
+    ]
+  },
+  {
+    "id": "ch09_nested_helper_family_op_name",
+    "file": "ch09_nested_helper_family_op_name.vera",
+    "chapter": 9,
+    "title": "Generic where-family resolving a bare op name",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation",
+      "nested_generic",
+      "monomorphization",
+      "bare_call"
+    ]
+  },
+  {
     "id": "ch02_alias_cycle_rejected",
     "file": "ch02_alias_cycle_rejected.vera",
     "chapter": 2,
@@ -2828,6 +2947,23 @@
       "type_alias",
       "parameterised_alias",
       "nat"
+    ]
+  },
+  {
+    "id": "ch02_generic_arg_branch_join",
+    "file": "ch02_generic_arg_branch_join.vera",
+    "chapter": 2,
+    "title": "Generic instantiation carried by a later branch",
+    "level": "run",
+    "spec_ref": "Section 2.5",
+    "features": [
+      "generics",
+      "forall",
+      "monomorphization",
+      "if_expression",
+      "match",
+      "array_literal",
+      "exn_effect"
     ]
   },
   {
@@ -3026,6 +3162,34 @@
     ]
   },
   {
+    "id": "ch07_invisible_import_op_name_lib",
+    "file": "ch07_invisible_import_op_name_lib.vera",
+    "chapter": 7,
+    "title": "Module with a private helper named like an effect op",
+    "level": "verify",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation"
+    ]
+  },
+  {
+    "id": "ch07_invisible_import_op_name",
+    "file": "ch07_invisible_import_op_name.vera",
+    "chapter": 7,
+    "title": "Bare effect op beside an invisible same-named import",
+    "level": "run",
+    "spec_ref": "Section 7.4",
+    "features": [
+      "cross_module",
+      "visibility",
+      "effect_operation",
+      "state_effect",
+      "bare_call"
+    ]
+  },
+  {
     "id": "ch08_state_alias_per_module_lib",
     "file": "ch08_state_alias_per_module_lib.vera",
     "chapter": 8,
@@ -3079,6 +3243,267 @@
       "type_alias",
       "state_effect",
       "cell_family"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_base",
+    "file": "ch08_module_generic_diamond_base.vera",
+    "chapter": 8,
+    "title": "Shared base of the same-named-generic diamond",
+    "level": "check",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_mid1",
+    "file": "ch08_module_generic_diamond_mid1.vera",
+    "chapter": 8,
+    "title": "Private generic shadowing an imported same-named one",
+    "level": "verify",
+    "spec_ref": "Section 8.5.2",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility",
+      "shadowing"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond_mid2",
+    "file": "ch08_module_generic_diamond_mid2.vera",
+    "chapter": 8,
+    "title": "Bare call to a dependency's public generic",
+    "level": "verify",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "bare_call"
+    ]
+  },
+  {
+    "id": "ch08_module_generic_diamond",
+    "file": "ch08_module_generic_diamond.vera",
+    "chapter": 8,
+    "title": "Two modules' same-named generics in one program",
+    "level": "run",
+    "spec_ref": "Section 11.16",
+    "features": [
+      "cross_module_generic",
+      "monomorphization",
+      "visibility",
+      "transitive_import",
+      "bare_call"
+    ]
+  },
+  {
+    "id": "ch08_prelude_adt_name_alias",
+    "file": "ch08_prelude_adt_name_alias.vera",
+    "chapter": 8,
+    "title": "A type alias may reuse a prelude data type's name",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "type_alias",
+      "prelude_shadowing",
+      "cross_module",
+      "declaration_order"
+    ]
+  },
+  {
+    "id": "ch08_module_prelude_adt_name",
+    "file": "ch08_module_prelude_adt_name.vera",
+    "chapter": 8,
+    "title": "A module may declare a data type named after a prelude one",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "cross_module",
+      "prelude_shadowing",
+      "adt",
+      "visibility_private"
+    ]
+  },
+  {
+    "id": "ch08_module_prelude_adt_contention_rejected",
+    "file": "ch08_module_prelude_adt_contention_rejected.vera",
+    "chapter": 8,
+    "title": "A module data type contending with a prelude one is a codegen error (#1277)",
+    "level": "check",
+    "spec_ref": "Section 8.4.1",
+    "expected_error": "E621",
+    "expected_error_stage": "compile",
+    "features": [
+      "cross_module",
+      "prelude_shadowing",
+      "adt",
+      "codegen_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_lib_int",
+    "file": "ch08_ambiguous_import_lib_int.vera",
+    "chapter": 8,
+    "title": "Dependency exporting a name a sibling also exports",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_lib_bool",
+    "file": "ch08_ambiguous_import_lib_bool.vera",
+    "chapter": 8,
+    "title": "The sibling dependency exporting that same name",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "features": [
+      "cross_module_generic",
+      "generic_function",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_rejected",
+    "file": "ch08_ambiguous_import_rejected.vera",
+    "chapter": 8,
+    "title": "Two imports supplying one bare name are refused",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "expected_error": "E155",
+    "features": [
+      "ambiguous_import",
+      "bare_call",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_swapped_rejected",
+    "file": "ch08_ambiguous_import_swapped_rejected.vera",
+    "chapter": 8,
+    "title": "The same refusal with the imports written the other way",
+    "level": "check",
+    "spec_ref": "Section 8.5",
+    "expected_error": "E155",
+    "features": [
+      "ambiguous_import",
+      "bare_call",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_qualified",
+    "file": "ch08_ambiguous_import_qualified.vera",
+    "chapter": 8,
+    "title": "Local declaration plus module-qualified calls disambiguate",
+    "level": "run",
+    "spec_ref": "Section 8.5.3",
+    "features": [
+      "ambiguous_import",
+      "module_qualified_call",
+      "shadowing",
+      "cross_module_generic"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_lib_int",
+    "file": "ch08_ambiguous_import_adt_lib_int.vera",
+    "chapter": 8,
+    "title": "Dependency exporting a data name a sibling also exports",
+    "level": "check",
+    "spec_ref": "Section 8.5.4",
+    "features": [
+      "adt",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_lib_bool",
+    "file": "ch08_ambiguous_import_adt_lib_bool.vera",
+    "chapter": 8,
+    "title": "The sibling dependency exporting that same data name",
+    "level": "check",
+    "spec_ref": "Section 8.5.4",
+    "features": [
+      "adt",
+      "visibility"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_rejected",
+    "file": "ch08_ambiguous_import_adt_rejected.vera",
+    "chapter": 8,
+    "title": "Two imports supplying one bare data name are refused",
+    "level": "check",
+    "spec_ref": "Section 8.5.2.2",
+    "expected_error": "E156",
+    "features": [
+      "ambiguous_import",
+      "adt",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_ambiguous_import_adt_swapped_rejected",
+    "file": "ch08_ambiguous_import_adt_swapped_rejected.vera",
+    "chapter": 8,
+    "title": "The same data refusal with the imports written the other way",
+    "level": "check",
+    "spec_ref": "Section 8.5.2.2",
+    "expected_error": "E156",
+    "features": [
+      "ambiguous_import",
+      "adt",
+      "resolution_error"
+    ]
+  },
+  {
+    "id": "ch08_alias_shadows_prelude_adt_name",
+    "file": "ch08_alias_shadows_prelude_adt_name.vera",
+    "chapter": 8,
+    "title": "Type alias shadowing a prelude ADT name",
+    "level": "run",
+    "spec_ref": "Section 8.4.1",
+    "features": [
+      "type_alias",
+      "prelude_adt_shadow",
+      "alias_resolution",
+      "assert"
+    ]
+  },
+  {
+    "id": "ch04_match_pair_scrutinee",
+    "file": "ch04_match_pair_scrutinee.vera",
+    "chapter": 4,
+    "title": "Match on a String / Array scrutinee",
+    "level": "run",
+    "spec_ref": "Section 4.9",
+    "features": [
+      "match",
+      "binding_pattern",
+      "string",
+      "array",
+      "json_keys"
+    ]
+  },
+  {
+    "id": "ch07_exn_payload_guard",
+    "file": "ch07_exn_payload_guard.vera",
+    "chapter": 7,
+    "title": "The Exn<E> payload is a runtime-guarded write boundary (#1268)",
+    "level": "run",
+    "spec_ref": "Section 2.6.5",
+    "features": [
+      "exn_effect",
+      "refinement_type",
+      "nat_narrowing",
+      "runtime_guard"
     ]
   }
 ]

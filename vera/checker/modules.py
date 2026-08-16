@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from vera import ast
 from vera.environment import TypeEnv
+from vera.monomorphize import namespace_adt_names, namespace_fn_names
 from vera.resolver import ResolvedModule
 
 
@@ -22,6 +23,9 @@ class ModulesMixin:
 
         1. Build an import-name filter from the program's ``import``
            declarations (selective vs wildcard).
+        1a. #1304: refuse a bare function, data-type or constructor name
+           two of this namespace's imports both supply, and keep it out of
+           the environment.
         2. For each resolved module, run the registration pass in an
            isolated TypeChecker to populate its ``TypeEnv``, then
            harvest the declarations into per-module dicts.
@@ -40,11 +44,20 @@ class ModulesMixin:
                 set(imp.names) if imp.names is not None else None
             )
 
-        # Snapshot builtin names (TypeEnv registers builtins in __post_init__)
+        # Snapshot builtin names (TypeEnv registers builtins in __post_init__).
+        # Hoisted above the #1304 refusal, which needs them: every injection
+        # below is a ``setdefault`` onto this same environment, so a name the
+        # built-in registry already holds is never won by an import and is
+        # therefore never ambiguous, however many dependencies export it.
         _builtins = TypeEnv()
         builtin_fn_names = set(_builtins.functions)
         builtin_data_names = set(_builtins.data_types)
         builtin_ctor_names = set(_builtins.constructors)
+
+        # 1a. #1304.
+        self._reject_ambiguous_imports(
+            program, builtin_fn_names, builtin_data_names, builtin_ctor_names,
+        )
 
         # 2. Register each module in isolation, harvest declarations
         for mod in self._resolved_modules:
@@ -183,15 +196,201 @@ class ModulesMixin:
             if not mod.direct:
                 continue
             for fn_name, fn_info in mod_fns.items():
+                # #1304: an ambiguous name is not injected AT ALL.  Injecting
+                # one supplier and reporting the clash beside it would leave
+                # the follow-on diagnostics keyed to whichever module the
+                # injection loop reached first — the very artefact this
+                # refusal removes — so the name simply denotes nothing here,
+                # and a bare call to it misses (E200) rather than binding a
+                # body chosen by iteration order.  Module-qualified calls are
+                # unaffected: they resolve against
+                # ``_module_functions[path]``, never this environment.
+                if fn_name in self._ambiguous_import_fn_names:
+                    continue
                 if name_filter is None or fn_name in name_filter:
                     self.env.functions.setdefault(fn_name, fn_info)
+            # #1304, data side: same rule and same reason as the functions
+            # above.  A type name two imports supply denotes nothing here, and
+            # so does a constructor name — which is filtered by its PARENT
+            # type (spec §8.5.4), so the two sets are consulted separately.
             for dt_name, dt_info in mod_data.items():
+                if dt_name in self._ambiguous_import_type_names:
+                    continue
                 if name_filter is None or dt_name in name_filter:
                     self.env.data_types.setdefault(dt_name, dt_info)
             for ct_name, ct_info in mod_ctors.items():
+                if ct_name in self._ambiguous_import_ctor_names:
+                    continue
                 parent = ct_info.parent_type
                 if name_filter is None or parent in name_filter:
                     self.env.constructors.setdefault(ct_name, ct_info)
+
+    def _reject_ambiguous_imports(
+        self, program: ast.Program,
+        builtin_fns: set[str], builtin_types: set[str],
+        builtin_ctors: set[str],
+    ) -> None:
+        """Refuse a bare name two of THIS namespace's imports supply (#1304).
+
+        Spec §8.5 orders a local declaration against an import (§8.5.2) and
+        prescribes the module-qualified form for reaching what a clash hides
+        (§8.5.3), but it defines no order between two imports that both
+        supply one name.  Neither did the implementation: the pick was a
+        set-iteration artefact, and one unchanged program accepted on one run
+        and reported ``body has type Bool`` on the next.  Refusing is what
+        DESIGN.md's explicitness (§0.2.2) and constrained-expressiveness
+        (§0.2.6) priorities give — an order would make the winning binding
+        implicit in import sequence, and would let a dependency ADDING an
+        export silently rebind a downstream bare call.
+
+        DEFINITION-GATED, not use-gated: the clash is refused because the
+        import pair exists, whether or not any body names it.  That is the
+        semantics codegen's E608 rail already has — a program importing two
+        suppliers and never calling either is E608 today — so the two layers
+        answer one question the same way, which is the whole of #1304's
+        complaint about three phases each deciding independently.  Both read
+        :func:`~vera.monomorphize.namespace_fn_names`; this side asks for its
+        OWN namespace's clashes (to report at its own import, and to keep the
+        name unbound), the E608 side asks the union (to decide whether a PAIR
+        of modules may share the flat namespace).
+
+        Reported once per clashing name, at the LAST import that supplies it
+        — the one whose presence completes the clash — and in sorted name
+        order, so the diagnostic stream is a function of the source alone.
+
+        Every namespace gets its own pass: the entry program here, and each
+        module's through the fresh checker :meth:`_check_module_bodies`
+        builds for it, whose diagnostics are surfaced into this one.  That is
+        what makes the refusal reach a module the entry program only imports
+        — the shape §8.5 left undefined and the only one where the flap was
+        observable, since E608 already refused the entry-visible pair.
+
+        THREE NAMESPACES, three codes, mirroring the split codegen's rails
+        already use: functions (E155, backstopped by E608), data types (E156,
+        by E609) and constructors (E157, by E610).  One code would have been
+        cheaper and wrong — a constructor clash is not a type clash (two
+        modules exporting differently-named ADTs can share a constructor
+        name, and only E610 catches that today), and the registry's existing
+        convention is one code per declaration namespace.
+
+        The data side flapped exactly as the function side did — measured on
+        two modules each exporting a ``public data Shape`` with different
+        constructor field types, where ``Sq(3)`` type-checked on some hash
+        seeds and was ``E213`` on others.  Its accepting seeds were the worse
+        half: ``check`` and ``verify`` both passed, and the program then died
+        at ``run`` with an ``E609`` located at line 0 of the entry file,
+        naming two modules the entry never imported.
+
+        Unlike the function side, the data side has no in-source escape
+        hatch: E609/E610 refuse two modules' same-named ADTs by DECLARATION,
+        with no visibility, filter, or shadowing relaxation (E608 got one in
+        #1281; E609 did not).  Measured — narrowing the second import to
+        exclude the type, and declaring the type locally, both leave the
+        program ``E609`` at compile.  So these two diagnostics prescribe
+        renaming, which is what actually works, rather than repeating the
+        function side's remedies.  Every program they refuse is one
+        E609/E610 already refused later and less precisely, so this moves a
+        rejection rather than adding one.
+
+        A name the BUILT-IN registry already owns is never ambiguous: every
+        injection below is a ``setdefault`` onto an environment the built-ins
+        populated first, so the incumbent wins and the imports never compete.
+        The three snapshots are passed in for that reason, and not passing
+        the function one was an over-refusal in this method's first version —
+        two dependencies exporting their own ``option_map`` were reported as
+        a clash when a bare ``option_map`` in fact resolves to the prelude's.
+        """
+        modules = [(mod.path, mod.program) for mod in self._resolved_modules]
+        fn_clashes = namespace_fn_names(
+            program, modules, prelude=builtin_fns,
+        ).ambiguous_in(None)
+        adt = namespace_adt_names(
+            program, modules,
+            owned_types=builtin_types, owned_ctors=builtin_ctors,
+        )
+        type_clashes = adt.types_in(None)
+        ctor_clashes = adt.ctors_in(None)
+        self._ambiguous_import_fn_names = frozenset(fn_clashes)
+        self._ambiguous_import_type_names = frozenset(type_clashes)
+        self._ambiguous_import_ctor_names = frozenset(ctor_clashes)
+
+        for clashes, kind, article, code in (
+            (fn_clashes, "function", "a", "E155"),
+            (type_clashes, "data type", "a", "E156"),
+            (ctor_clashes, "constructor", "a", "E157"),
+        ):
+            # Sorted, because the docstring above promises sorted name
+            # order and the producers hand this back in IMPORT order —
+            # deterministic (measured stable across hash seeds), but not
+            # what the contract says.  Sorting by NAME leaves each name's
+            # supplier list alone, which is the ordering
+            # `ambiguous_in` deliberately keeps in import order so the
+            # report can name the import that completed the clash
+            # (#1330 review).
+            for name, deps in sorted(clashes.items()):
+                labels = [".".join(dep) for dep in deps]
+                joined = ", ".join(f"'{label}'" for label in labels[:-1])
+                joined = f"{joined} and '{labels[-1]}'"
+                self._error(
+                    self._find_import_decl(program, deps[-1]),
+                    f"Bare {kind} name '{name}' is supplied by more than one "
+                    f"import: modules {joined}.",
+                    rationale=(
+                        f"Two imports supplying one bare {kind} name leave it "
+                        "ambiguous. The language defines no order between "
+                        f"them, so a use of '{name}' here would name "
+                        f"{article} declaration chosen by import sequence "
+                        "rather than by the program's text — and a dependency "
+                        "later adding this export would silently rebind it."
+                    ),
+                    fix=(
+                        self._ambiguous_fn_fix(name, labels)
+                        if code == "E155"
+                        else self._ambiguous_data_fix(name, kind, labels)
+                    ),
+                    spec_ref=(
+                        'Chapter 8, Section 8.5.2.2 '
+                        '"Two Imports Supplying One Name"'
+                    ),
+                    error_code=code,
+                )
+
+    @staticmethod
+    def _ambiguous_fn_fix(name: str, labels: list[str]) -> str:
+        """The two remedies that work for a clashing FUNCTION name (#1304).
+
+        Both measured end to end, through to the runtime value: narrowing one
+        import leaves a single supplier, and a local declaration takes every
+        bare call while leaving each import reachable under ``::``.
+        """
+        return (
+            f"Import at most one supplier of '{name}': name the other "
+            f"import's declarations selectively, as "
+            f"'import {labels[-1]}(<other-name>);' (replace <other-name> "
+            f"with a declaration you need from that module). To keep "
+            f"reaching both, declare '{name}' in this file — a local "
+            "declaration takes every bare call — and use the "
+            f"module-qualified form '{labels[0]}::{name}(...)' for the "
+            "imported ones."
+        )
+
+    @staticmethod
+    def _ambiguous_data_fix(name: str, kind: str, labels: list[str]) -> str:
+        """The remedy that works for a clashing TYPE or CONSTRUCTOR name.
+
+        Renaming, and only renaming.  The function side's two remedies are
+        deliberately NOT offered here: both were measured against this shape
+        and both still fail at compile with E609, because that rail refuses
+        two modules' same-named data declarations however the importer
+        filters or shadows them (spec §11.16).
+        """
+        return (
+            f"Rename the {kind} '{name}' in one of the two modules — "
+            f"'{labels[0]}' or '{labels[-1]}'. Narrowing an import or "
+            f"declaring '{name}' in this file does not resolve it: "
+            "compilation refuses two modules' same-named data declarations "
+            "whatever the importer does with them."
+        )
 
     def _check_module_bodies(self, mod: ResolvedModule) -> None:
         """Type-check *mod*'s bodies as *mod* itself would be checked (#1244).

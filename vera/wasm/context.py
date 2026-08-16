@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Callable
 from vera import ast
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP, CodegenSkip
+from vera.slots import bare_call_denotes_user_fn
 
 if TYPE_CHECKING:
     from vera.codegen import ConstructorLayout
@@ -89,6 +90,7 @@ class WasmContext(
         effect_op_result_wt: dict[str, str | None] | None = None,
         effect_op_result_vera: dict[str, str | None] | None = None,
         effect_op_cells: dict[str, CellNames] | None = None,
+        state_getters: dict[str, str] | None = None,
         ctor_layouts: dict[str, ConstructorLayout] | None = None,
         adt_type_names: set[str] | None = None,
         generic_fn_info: (
@@ -97,6 +99,7 @@ class WasmContext(
         generic_constrained_vars: dict[str, frozenset[str]] | None = None,
         ctor_to_adt: dict[str, str] | None = None,
         known_fns: set[str] | None = None,
+        scoped_fns: set[str] | None = None,
         ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] | None = None,
         adt_tp_counts: dict[str, int] | None = None,
         adt_tp_param_names: dict[str, tuple[str, ...]] | None = None,
@@ -144,6 +147,21 @@ class WasmContext(
         # Only State get/put have entries; `throw` and user-effect ops reach
         # no host cell and are absent.
         self._effect_op_cells: dict[str, CellNames] = effect_op_cells or {}
+        # #1285: cell FAMILY -> that cell's `$vera.state_get_<T>` import.
+        # The four registries above are keyed by op NAME, which is the right
+        # key for a call site (`get(())` names no family, so it means
+        # whichever cell the row or the enclosing handler binds) and the
+        # wrong key for a contract: `new(State<Bool>)` names its family
+        # explicitly, exactly as `old(State<Bool>)` does.  Reading the
+        # name-keyed registry gave `new()` whichever family's getter was
+        # installed LAST, so under `effects(<State<Int>, State<Bool>>)` a
+        # `new(State<Bool>)` read `state_get_Int` — an i64 into the Bool
+        # comparison's `i32.eq`, check-green and verify-green, dead at load.
+        # Keyed and populated so `new()` resolves the way `old()` already
+        # did (`_state_effect_family` on both sides), and NOT filtered by
+        # bare-call ownership (#1284): a contract form names the effect, so
+        # a user `fn get` cannot shadow it.
+        self._state_getters: dict[str, str] = state_getters or {}
         # #976 option C: op_name -> :class:`StateClauseEntry` for the
         # innermost enclosing ``handle[State<T>]``.  When a get/put call site
         # has an entry here, the clause BODY is inlined at the site
@@ -204,8 +222,25 @@ class WasmContext(
         )
         # Constructor name → ADT name reverse mapping
         self._ctor_to_adt: dict[str, str] = ctor_to_adt or {}
-        # Known locally-defined function names (for cross-module guard rail)
+        # Every WASM symbol this compilation registered — the REGISTRATION
+        # question, and only that: `_translate_call`'s guard rail asks whether
+        # a RESOLVED call target (already mono-mangled, already `mod$…`
+        # rerouted) has an implementation to land on.  Flat by nature; a
+        # symbol emitted for some other namespace is still a symbol.
         self._known_fns: set[str] = known_fns or set()
+        # The names visible in the compiling declaration's LEXICAL scope —
+        # #1284's ownership question, which is a different one (#1299).
+        # Splitting them is the fix: one table answers "does this symbol
+        # exist?", the other "whose declaration does this bare name denote
+        # HERE?", and answering the second with the first is what let an
+        # invisible import claim a call site's `get`.  Defaults to
+        # ``known_fns`` so a context built without one keeps the flat
+        # answer rather than silently owning NO name — an empty scope would
+        # route every bare call to the op registries, which is the opposite
+        # error and a far louder one.
+        self._scoped_fns: set[str] = (
+            self._known_fns if scoped_fns is None else scoped_fns
+        )
         # Per-field ADT type-param indices for sparse constructors (e.g. Err → (1,))
         self._ctor_adt_tp_indices: dict[str, tuple[int | None, ...]] = (
             ctor_adt_tp_indices or {}
@@ -393,6 +428,26 @@ class WasmContext(
         # swapped independently and fall out of step (the #1184 mispairing).
         # Seeded empty; codegen calls `set_alias_env` before translation.
         self._alias_env: AliasEnv = EMPTY_ALIAS_ENV
+        # #1268: lower a refinement predicate to a boundary guard over a
+        # value already in a local.  Injected by codegen via
+        # `set_refinement_guard_emitter`, because the two halves of a §2.6.5
+        # guard live on opposite sides of this seam: the REPRESENTATION half
+        # — which local, at what width, in what order relative to the value
+        # on the stack — is this context's, while lowering it needs the string
+        # pool's trap message, the `$vera.contract_fail` import flag and the
+        # E617/E618 diagnostics, all of which are the generator's.  The same
+        # injection shape as `set_adt_eq_derivable`.  `None` until installed:
+        # a context translating a `throw` without it FAILS CLOSED (a loud
+        # skip), never silently unguarded — see
+        # `_emit_exn_payload_refine_guard`.  A lifted-closure context is
+        # deliberately left at `None`: it carries no `effect_op_cells`, so no
+        # `throw` there is a write boundary this could guard (it does not
+        # compile at all today), and the closed failure is what a future
+        # thread-through would meet rather than a silently unguarded payload.
+        self._refinement_guard_emitter: (
+            Callable[[ast.TypeExpr, int, str, WasmSlotEnv], list[str] | None]
+            | None
+        ) = None
         # Closure signature registry: sig_key -> (type_name, param/result WAT)
         self._closure_sigs: dict[str, str] = {}
         # Flags for resource requirements detected during translation
@@ -594,6 +649,26 @@ class WasmContext(
         """
         self._alias_env = env
 
+    def set_refinement_guard_emitter(
+        self,
+        emitter: Callable[
+            [ast.TypeExpr, int, str, WasmSlotEnv], list[str] | None
+        ],
+    ) -> None:
+        """Install the §2.6.5 refinement-predicate guard lowering (#1268).
+
+        *emitter* takes ``(type_expr, value_local, message, env)`` and returns
+        the WAT that traps via ``$vera.contract_fail`` when the value in
+        *value_local* violates *type_expr*'s predicate — or ``None`` when the
+        type is unrefined, or refined over a base codegen emits no guard for
+        (an erased ``@Unit``, a nested refinement).  Codegen binds it to
+        ``CodeGenerator._emit_boundary_refinement_guard`` for THIS context, so
+        the trap message interns into the shared string pool and the
+        contract-fail import flag is raised on the generator that assembles
+        the module.
+        """
+        self._refinement_guard_emitter = emitter
+
     def set_closure_id_start(self, start: int) -> None:
         """Set the starting closure ID for this context."""
         self._next_closure_id = start
@@ -642,6 +717,35 @@ class WasmContext(
     def get_old_state_local(self, type_name: str) -> int | None:
         """Get the local index holding the old() snapshot for a State type."""
         return self._old_state_locals.get(type_name)
+
+    def _bare_call_denotes_op(self, name: str) -> bool:
+        """Is a BARE call to *name* here the effect operation? (#1284)
+
+        Codegen's leg of :func:`~vera.slots.bare_call_denotes_user_fn`, over
+        ``_scoped_fns`` — the names visible in the compiling declaration's
+        LEXICAL scope, which is the table the checker resolves against.
+        Every bare-call site that consults an op registry asks this first,
+        so a name the checker resolved to a user declaration is lowered as
+        the ordinary call the checker typed: the clause-inline dispatch, the
+        host-cell intrinsics, the #1233 addressability gate, the three
+        result-type inference sites, and ``_handle_exn_always_throws``'s
+        ``throw_installed`` question, which is the same one for ``Exn``'s
+        operation.
+
+        Not for the QUALIFIED spelling: ``State.get(())`` names the effect,
+        so no declaration can shadow it and the registries answer directly.
+
+        NOT ``_known_fns`` (#1299).  That set is the registration table the
+        guard rail reads, and it is flat by construction — every symbol the
+        whole compilation absorbed, including a module's ``private fn get``,
+        a public one a selective import excludes, and the bare key a
+        ``forall<T>`` parent's ``where`` helper keeps beside its
+        clone-qualified one.  Asked over it, this predicate answered
+        "user-owned" at a site where the checker had resolved the operation:
+        check-green source ran the invisible declaration's body where the
+        widths agreed, and failed to load where they did not.
+        """
+        return not bare_call_denotes_user_fn(name, self._scoped_fns)
 
     def alloc_param(self) -> int:
         """Allocate a parameter slot (already in WASM signature).
@@ -1124,7 +1228,12 @@ class WasmContext(
             return True
         if isinstance(expr, ast.UnitLit):
             return True
-        if isinstance(expr, ast.FnCall) and expr.name in self._effect_ops:
+        # #1284: bare form, so the ownership predicate decides whether the
+        # op registry answers at all — a user `fn put` returning a value is
+        # not void just because the handler's `put` is.
+        if (isinstance(expr, ast.FnCall)
+                and self._bare_call_denotes_op(expr.name)
+                and expr.name in self._effect_ops):
             _name, is_void = self._effect_ops[expr.name]
             return is_void
         # User-defined fns declared with @Unit return type — registry stores

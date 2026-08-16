@@ -1,0 +1,21 @@
+-- Conformance: the same data refusal with the imports written the other way (Chapter 8, #1304)
+-- Tests: [E156] and [E157] again.  The verdict is a property of the import
+-- SET, not of which import is written first: an order-sensitive rule would
+-- accept one of these two spellings and reject the other.  The manifest pins
+-- [E156] on BOTH orders rather than one code each -- pinning a different code
+-- per order would let a regression that dropped [E156] in this order alone go
+-- unnoticed.  Both codes firing in both orders is asserted by the unit cells
+-- in tests/test_ambiguous_import_refusal_1304.py.
+import ch08_ambiguous_import_adt_lib_bool;
+import ch08_ambiguous_import_adt_lib_int;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match Sq(3) {
+    Sq(@Int) -> @Int.0,
+    Dot -> 0
+  }
+}

@@ -12,9 +12,13 @@ Requirements:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
+import random
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -27,6 +31,21 @@ from vera.checker import typecheck
 from vera.parser import parse_file
 from vera.resolver import ModuleResolver
 from vera.transform import transform
+from tests.json_domain_helpers import (
+    ERR_PREFIX,
+    INT_ROUNDS_TO_INFINITY,
+    MAX_FINITE_AS_INT,
+    accept_domain_src,
+    err,
+    ok,
+)
+from vera.wasm.json_serde import (
+    lone_surrogate_message,
+    _non_finite_message,
+    non_finite_number_message,
+    non_finite_parse_message,
+    format_json_number,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -207,6 +226,58 @@ def _both_stdouts(src: str, tmp_path: Path, name: str = "parity") -> tuple[str, 
         f"Node harness reported error: {node.get('error')!r}"
     )
     return str(py_out), str(node["stdout"])
+
+
+def _both_failures(src: str, tmp_path: Path, name: str) -> tuple[str, str]:
+    """Compile ``src`` ONCE, run the same ``.wasm`` under both runtimes
+    expecting each to FAIL, and return ``(native_message, browser_message)``.
+
+    The failure-side counterpart to :func:`_both_stdouts`, for operations
+    whose contract is "refuse loudly" rather than "return a value".  Each
+    side asserts that the call did not succeed, so a host that quietly
+    produced output — which is exactly what the browser did with a NaN
+    ``JNumber`` before #1293 — fails here rather than reading as a pass.
+    """
+    src_path = tmp_path / f"{name}.vera"
+    src_path.write_text(src, encoding="utf-8")
+    wasm_path, result = _compile_file(src_path, tmp_path)
+
+    # ``tee_stdout`` mirrors every ``IO.print`` to ``sys.stdout`` as it
+    # happens, so redirecting it gives the native side the same
+    # observation the Node harness gives for free: what reached the
+    # terminal, in real time, before the call failed.  Since #1302
+    # ``execute`` also carries the buffer on ``WasmTrapError.stdout`` for
+    # a host-callback failure — it used to discard it — but the tee is
+    # what this helper wants, because it answers "did anything actually
+    # get written?" for BOTH failure shapes without the helper having to
+    # know which one it caught.
+    native_tee = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(native_tee):
+            native_out = execute(result, tee_stdout=True)
+    except Exception as exc:  # noqa: BLE001 — any failure is the signal
+        native_msg = str(exc)
+    else:
+        raise AssertionError(
+            "native runtime did not fail; "
+            f"stdout={native_out.stdout!r}"
+        )
+    assert native_tee.getvalue() == "", (
+        "native runtime produced output on a failing call: "
+        f"{native_tee.getvalue()!r}"
+    )
+
+    node = _run_node(wasm_path)
+    browser_msg = str(node.get("error") or "")
+    assert browser_msg, (
+        "browser runtime did not fail; "
+        f"stdout={node['stdout']!r}"
+    )
+    assert node["stdout"] == "", (
+        "browser runtime produced output on a failing call: "
+        f"{node['stdout']!r}"
+    )
+    return native_msg, browser_msg
 
 
 def _parity_stdout(src: str, tmp_path: Path, name: str = "parity") -> str:
@@ -2621,6 +2692,134 @@ public fn main(@Unit -> @Unit)
         assert self._eager_gc_node(src, monkeypatch, tmp_path) == "60"
 
 
+# (id, code point, label).  Every character either runtime's built-in
+# trim treats as whitespace, plus the six §9.7.2 now names.  The two
+# host libraries disagree about this set in BOTH directions, which is
+# why the rule has to be written down rather than inherited: Python's
+# ``str.strip`` takes U+001C–U+001F and U+0085, JavaScript's ``trim``
+# does not; ``trim`` takes U+FEFF, ``strip`` does not.
+_DECIMAL_WS_CASES = [
+    # The set §9.7.2 states — the same one `is_whitespace` uses.
+    ("tab", 0x09, True), ("lf", 0x0A, True), ("vt", 0x0B, True),
+    ("ff", 0x0C, True), ("cr", 0x0D, True), ("space", 0x20, True),
+    # Python-only: the four information separators and NEL.
+    ("fs", 0x1C, False), ("gs", 0x1D, False), ("rs", 0x1E, False),
+    ("us", 0x1F, False), ("nel", 0x85, False),
+    # Accepted by both built-ins, in neither runtime's stated set.
+    ("nbsp", 0xA0, False), ("ogham", 0x1680, False),
+    ("en_quad", 0x2000, False), ("line_sep", 0x2028, False),
+    ("para_sep", 0x2029, False), ("narrow_nbsp", 0x202F, False),
+    ("mmsp", 0x205F, False), ("ideographic", 0x3000, False),
+    # JavaScript-only: the byte-order mark.
+    ("bom", 0xFEFF, False),
+]
+
+
+class TestBrowserDecimalWhitespaceSet856:
+    """`decimal_from_string` ignores ONE stated whitespace set (#1303
+    review).
+
+    §9.7.2 says the grammar is "applied after ignoring surrounding
+    whitespace" and that the accepted domain is defined by the grammar
+    "rather than inherited from whatever the host library parses" — but
+    the whitespace half was inherited, from ``str.strip`` on one host
+    and ``String.prototype.trim`` on the other.  Those two sets differ
+    in both directions, so six code points parted the runtimes: a
+    decimal wrapped in U+0085 was ``Some`` natively and ``None`` in the
+    browser, and one wrapped in U+FEFF was the other way round.
+
+    The set is now the one the language already states for
+    `is_whitespace` (§9.7.x): tab, LF, VT, FF, CR, space.  Nothing else
+    is trimmed on either runtime, so a decimal padded with a no-break
+    space is refused by both rather than accepted by both for reasons
+    neither specification names.
+    """
+
+    _SRC = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  match decimal_from_string("{lit}") {{
+    Some(@Decimal) -> IO.print("ACCEPT"),
+    None -> IO.print("REFUSE")
+  }}
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("case_id", "code_point", "trimmed"),
+        _DECIMAL_WS_CASES,
+        ids=[c[0] for c in _DECIMAL_WS_CASES],
+    )
+    @pytest.mark.parametrize("where", ["leading", "trailing"])
+    def test_whitespace_acceptance_agrees(
+        self, where: str, case_id: str, code_point: int, trimmed: bool,
+        tmp_path: Path,
+    ) -> None:
+        esc = f"\\u{{{code_point:04X}}}"
+        lit = esc + "1.5" if where == "leading" else "1.5" + esc
+        expected = "ACCEPT" if trimmed else "REFUSE"
+        out = _parity_stdout(
+            self._SRC.format(lit=lit), tmp_path, f"decws_{where}_{case_id}",
+        )
+        assert out == expected
+
+
+class TestBrowserLeadingBomParity1303:
+    """A leading U+FEFF survives the trip into the browser host.
+
+    ``new TextDecoder('utf-8')`` defaults to ``ignoreBOM: false``, whose
+    meaning is the reverse of its name: it REMOVES a byte-order mark at
+    the start of the buffer.  Every Vera string reaching a host binding
+    goes through that decoder, so any string whose first character was
+    U+FEFF arrived one character shorter than it left — while the
+    reference host's ``safe_utf8_decode`` passes it straight through.
+
+    Found from the `decimal_from_string` whitespace work, where it was
+    the one code point still diverging after both hosts agreed on a
+    trim set; the cause turned out to have nothing to do with trimming
+    and to reach much further than `Decimal`.  The cases below are the
+    three families that showed it, each asserted for cross-host
+    equality *and* against the expected string, since two hosts both
+    dropping the mark would satisfy equality alone.
+    """
+
+    @pytest.mark.parametrize(("case_id", "body", "expected"), [
+        # The mark is the first character of the buffer — the only
+        # position the default decoder strips.
+        ("print", 'IO.print("\\u{FEFF}x")', "﻿x"),
+        # Control: not first, so it was never at risk.  Pinned so a
+        # future "fix" that strips U+FEFF everywhere goes red.
+        ("print_trailing", 'IO.print("x\\u{FEFF}")', "x﻿"),
+        # A BOM-prefixed document is not JSON; both hosts must refuse.
+        (
+            "json_parse",
+            'match json_parse("\\u{FEFF}{}") { Ok(@Json) -> IO.print("OK"),'
+            ' Err(@String) -> IO.print("ERR") }',
+            "ERR",
+        ),
+        # Markdown keeps it as text rather than losing it.
+        (
+            "md_parse",
+            'match md_parse("\\u{FEFF}hi") {'
+            ' Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),'
+            ' Err(@String) -> IO.print("ERR") }',
+            "﻿hi",
+        ),
+    ])
+    def test_leading_bom_is_not_swallowed(
+        self, case_id: str, body: str, expected: str, tmp_path: Path,
+    ) -> None:
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  {body}
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"bom_{case_id}") == expected
+
+
 class TestBrowserDecimalExact856:
     """Browser↔native Decimal parity (#856).
 
@@ -3137,8 +3336,10 @@ _SET_ELEMENT_CASES = [
     ("bool", "Bool", "true", "false"),
 ]
 
-# (id, JSON input as written in Vera source, expected browser
+# (id, JSON input as written in Vera source, expected canonical
 #  json_stringify output).  One case per Json ADT tag, plus nesting.
+# Since #1293 the expected string is the *shared* output of both hosts,
+# not the browser's alone: spec §9.7.1 names the compact form canonical.
 _JSON_TAG_CASES = [
     ("jnull", "null", "null"),
     ("jbool_true", "true", "true"),
@@ -3155,6 +3356,46 @@ _JSON_TAG_CASES = [
     ("array_of_objects", '[{\\"k\\":1},{\\"k\\":2}]', '[{"k":1},{"k":2}]'),
     ("empty_array", "[]", "[]"),
     ("empty_object", "{}", "{}"),
+]
+
+# (id, JSON input as written in Vera source, expected canonical output).
+# Number rendering is where the two hosts diverged most widely (#1293):
+# the integral ``1`` → ``1.0`` mutation the issue names is one row of a
+# larger table, because Python's ``repr`` and ECMAScript's
+# Number::toString disagree on *four* independent boundaries.  Every row
+# here was measured on both hosts before the fix and is a boundary, not a
+# sample: the exponential thresholds (10^21 upward, 10^-7 downward), the
+# exponent's own spelling, and negative zero.
+_JSON_NUMBER_CASES = [
+    # Integral values render without a fractional part — the #1293 axis.
+    ("integral", "[1,2]", "[1,2]"),
+    ("integral_negative", "[-1]", "[-1]"),
+    ("integral_zero", "[0]", "[0]"),
+    # Negative zero keeps its sign bit through the ADT but renders "0".
+    ("negative_zero", "[-0.0]", "[0]"),
+    # Fractional values are untouched by the integral rule.
+    ("fractional", "[1.5,2.25]", "[1.5,2.25]"),
+    ("fractional_small", "[0.1]", "[0.1]"),
+    ("fractional_long", "[12345.6789]", "[12345.6789]"),
+    # Upper exponential boundary: plain digits below 10^21, exponent at
+    # and above it.  Python's repr switches at 10^16 instead.
+    ("plain_1e15", "[1e15]", "[1000000000000000]"),
+    ("plain_1e16", "[1e16]", "[10000000000000000]"),
+    ("plain_1e20", "[1e20]", "[100000000000000000000]"),
+    ("exp_1e21", "[1e21]", "[1e+21]"),
+    ("exp_1e30", "[1e30]", "[1e+30]"),
+    ("plain_17_digits", "[123456789012345680]", "[123456789012345680]"),
+    # Lower exponential boundary: plain digits down to 10^-6, exponent
+    # below it.  Python's repr switches at 10^-5 instead.
+    ("plain_1e_minus_6", "[0.000001]", "[0.000001]"),
+    ("exp_1e_minus_7", "[1e-7]", "[1e-7]"),
+    ("exp_1e_minus_300", "[1e-300]", "[1e-300]"),
+    # Exponent spelling: no zero padding, explicit sign only when
+    # positive... which is exactly where Python writes "1e-07".
+    ("exp_multi_digit_mantissa", "[1.25e-9]", "[1.25e-9]"),
+    ("exp_max_double", "[1.7976931348623157e308]",
+     "[1.7976931348623157e+308]"),
+    ("exp_min_subnormal", "[5e-324]", "[5e-324]"),
 ]
 
 
@@ -3425,6 +3666,22 @@ private fn round_trip(@String -> @String)
 """
 
 
+def _json_round_trip_src(json_text: str, *, times: int = 1) -> str:
+    """A ``main`` that parses ``json_text`` and stringifies it ``times``
+    times, re-parsing between each — the observable form of the
+    ``json_stringify ∘ json_parse`` idempotence property."""
+    inner = 'round_trip("' + json_text + '")'
+    for _ in range(times - 1):
+        inner = f"round_trip({inner})"
+    return _JSON_ROUND_TRIP_PRELUDE + f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print({inner})
+}}
+"""
+
+
 class TestBrowserJsonRoundTrip349:
     """``readJson`` / ``json_stringify`` coverage (#349).
 
@@ -3433,24 +3690,12 @@ class TestBrowserJsonRoundTrip349:
     ``readJson`` — all six ADT tags including the ``decodeMap``-backed
     JObject arm — never ran in the browser.
 
-    These are Node-only assertions rather than parity assertions
-    because ``json_stringify`` genuinely diverges between the two hosts;
-    see :meth:`TestBrowserJsonStringifyParity349.test_number_and_spacing`
-    for the pinned divergence.  Pinning the browser side still catches a
-    regression in ``readJson``'s tag decoding, which is what was
-    uncovered.
+    These were Node-only assertions while ``json_stringify`` diverged
+    between the hosts (#1293).  Since that closed they are full parity
+    assertions: the same ``.wasm`` runs under both runtimes and one
+    expected string covers both, so a regression in either host's
+    serializer — not just ``readJson``'s tag decoding — fails here.
     """
-
-    @staticmethod
-    def _node_stdout(src: str, tmp_path: Path, name: str) -> str:
-        src_path = tmp_path / f"{name}.vera"
-        src_path.write_text(src, encoding="utf-8")
-        wasm_path, _ = _compile_file(src_path, tmp_path)
-        node = _run_node(wasm_path)
-        assert not node.get("error"), (
-            f"Node harness reported error: {node.get('error')!r}"
-        )
-        return str(node["stdout"])
 
     @pytest.mark.parametrize(
         ("case_id", "json_text", "expected"),
@@ -3460,61 +3705,664 @@ class TestBrowserJsonRoundTrip349:
     def test_json_stringify_tag_round_trip(
         self, case_id: str, json_text: str, expected: str, tmp_path: Path,
     ) -> None:
-        src = _JSON_ROUND_TRIP_PRELUDE + f"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{{
-  IO.print(round_trip("{json_text}"))
-}}
-"""
-        assert self._node_stdout(src, tmp_path, f"json_{case_id}") == expected
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"json_{case_id}") == expected
 
 
 class TestBrowserJsonStringifyParity349:
-    """``json_stringify`` does NOT match the native runtime (#349 finding,
-    tracked as #1293).
+    """``json_stringify`` agrees byte for byte across the two runtimes
+    (#349 finding, tracked as #1293, closed by the canonical form).
 
-    The Python host calls ``json.dumps(value, ensure_ascii=False,
-    allow_nan=False)`` — default ``", "`` / ``": "`` separators, and
-    ``read_json`` hands it Python ``float``\\ s so an integral JNumber
-    renders as ``1.0``.  The browser host calls bare
-    ``JSON.stringify(value)`` — no separator padding, and JS renders an
-    integral ``Number`` as ``1``.
+    Both hosts emit the compact form spec §9.7.1 pins: ``,`` / ``:``
+    with no padding, and numbers rendered by ECMAScript's
+    Number::toString.  Before the fix the Python host called
+    ``json.dumps(value, ensure_ascii=False, allow_nan=False)`` — ``", "``
+    / ``": "`` separators, and ``read_json`` hands it Python ``float``\\ s
+    so an integral JNumber rendered as ``1.0`` — while the browser host
+    called bare ``JSON.stringify(value)``.
 
-    Every other Json binding is byte-identical across the two runtimes;
-    this one is not, and nothing in the suite noticed because
-    ``json_stringify`` had no browser-side caller until #349 added one.
-
-    Both sides are pinned as exact strings rather than marked ``xfail``:
-    a bare ``xfail`` accepts *any* failure, so a broken compile, a dead
-    Node harness or an unrelated ``runtime.mjs`` regression would all
-    read as "yes, the known divergence" and this — the only browser-side
-    coverage of ``json_stringify`` — would stay green through a real
-    regression.  Pinning both outputs tolerates exactly the documented
-    difference and nothing else.
-
-    Converging the two hosts therefore fails **five** browser assertions,
-    not one: this test, plus the ``jarray``, ``jobject``, ``nested`` and
-    ``array_of_objects`` entries of :data:`_JSON_TAG_CASES` — the four
-    whose pinned strings carry a separator or an integral number.  (The
-    other seven tag cases are already byte-identical across the hosts.)
-    That red is the prompt to collapse each pinned pair into a single
-    parity assertion.
+    The class is a parity battery rather than a pair of pinned strings
+    because there is no longer a divergence to pin.  It keeps the shape
+    that made the pins useful: an exact expected string on every case, so
+    a broken compile, a dead Node harness or an unrelated ``runtime.mjs``
+    regression cannot read as "as expected".
     """
 
     def test_number_and_spacing(self, tmp_path: Path) -> None:
-        src = _JSON_ROUND_TRIP_PRELUDE + """
+        """The headline #1293 case: integral numbers and separators."""
+        src = _json_round_trip_src("[1,2]")
+        assert _parity_stdout(src, tmp_path, "json_parity") == "[1,2]"
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_NUMBER_CASES,
+        ids=[c[0] for c in _JSON_NUMBER_CASES],
+    )
+    def test_number_rendering_boundaries(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Every boundary where ``repr(float)`` and Number::toString part
+        company, not only the integral one #1293's title names.
+
+        Fixing the integral case alone would leave ``1e16``, ``1e-7``,
+        ``0.000001`` and ``-0.0`` diverging, and a battery built only
+        around the reported symptom would not have noticed.
+        """
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"jsonnum_{case_id}") == expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_TAG_CASES + _JSON_NUMBER_CASES,
+        ids=[c[0] for c in _JSON_TAG_CASES + _JSON_NUMBER_CASES],
+    )
+    def test_stringify_is_idempotent(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """``json_stringify(json_parse(·))`` is a fixed point on both hosts.
+
+        A canonical form that is not idempotent is not canonical: feeding
+        one host's output back through the pair must land on the same
+        bytes, or ``1`` → ``1.0`` → ``1.0`` style drift can still
+        accumulate across a pipeline.  Three passes, so a form that only
+        stabilises after the first is caught too.
+        """
+        src = _json_round_trip_src(json_text, times=3)
+        assert _parity_stdout(src, tmp_path, f"jsonidem_{case_id}") == expected
+
+
+# (id, JSON input as written in Vera source, expected canonical output).
+# Every row is a *key* the canonical form must carry through the browser
+# host's JS intermediates unchanged.  None of them can be spelled with an
+# alphabetically-ordered object, which is all the rest of the JSON
+# battery uses — so none of them was covered.
+_JSON_KEY_ORDER_CASES = [
+    # Two array-index keys, written in descending order.
+    ("descending_index", '{\\"2\\":1,\\"1\\":2}', '{"2":1,"1":2}'),
+    # Numeric, not lexicographic: "10" before "9", with a non-index key
+    # after both so the two orderings cannot coincide.
+    ("numeric_vs_lexical", '{\\"10\\":1,\\"9\\":1,\\"a\\":1}',
+     '{"10":1,"9":1,"a":1}'),
+    # An index key inserted *after* a non-index one — the shape that
+    # moves to the front rather than merely swapping with a neighbour.
+    ("index_after_name", '{\\"b\\":1,\\"3\\":2,\\"a\\":3}',
+     '{"b":1,"3":2,"a":3}'),
+    ("nested_in_object", '{\\"x\\":{\\"2\\":1,\\"1\\":2}}',
+     '{"x":{"2":1,"1":2}}'),
+    ("nested_in_array", '[{\\"2\\":1,\\"1\\":2}]', '[{"2":1,"1":2}]'),
+    # ``__proto__`` is not an ordering case: assigning it to an ordinary
+    # JS object runs Object.prototype's setter and creates no own
+    # property at all, so the whole field vanishes from the output.
+    ("proto_key", '{\\"__proto__\\":{\\"a\\":1}}', '{"__proto__":{"a":1}}'),
+    # A duplicate key keeps the LAST value at the FIRST position, which
+    # is what a Python dict and a JS Map both do — pinned so the fix
+    # cannot quietly move the survivor to the end.
+    ("duplicate_key", '{\\"b\\":1,\\"a\\":1,\\"b\\":2}', '{"b":2,"a":1}'),
+]
+
+
+class TestBrowserJsonKeyOrderParity1293:
+    """Object key order survives the browser host's JS intermediates.
+
+    Canonical (§9.7.1) key order is insertion order — what both hosts'
+    underlying ``Map<String, Json>`` bucket already holds, and what
+    ``dumps_canonical`` documents itself as preserving.  The browser host
+    used to reach that bucket through *ordinary JS objects* on both sides
+    of the WASM boundary: ``JSON.parse`` returns one, ``writeJson``
+    enumerated it with ``Object.entries``, and ``readJson`` rebuilt one
+    key by key.  An ordinary object cannot carry insertion order —
+    ES OrdinaryOwnPropertyKeys lists array-index keys first, in ascending
+    numeric order — nor a key named ``__proto__``, whose assignment hits
+    ``Object.prototype``'s setter instead of creating an own property.
+
+    Both losses are silent and neither is visible to an object with
+    alphabetically-ordered, non-numeric keys, which is the only shape
+    the rest of the JSON battery uses.  So the hole sat inside exactly
+    the property #1293 claims to have fixed.
+    """
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_KEY_ORDER_CASES,
+        ids=[c[0] for c in _JSON_KEY_ORDER_CASES],
+    )
+    def test_key_order_round_trip(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        src = _json_round_trip_src(json_text)
+        assert _parity_stdout(src, tmp_path, f"jsonkey_{case_id}") == expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "json_text", "expected"),
+        _JSON_KEY_ORDER_CASES,
+        ids=[c[0] for c in _JSON_KEY_ORDER_CASES],
+    )
+    def test_key_order_is_idempotent(
+        self, case_id: str, json_text: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Three passes, not one.
+
+        A host that reorders on every pass and a host that reorders once
+        into a fixed point are both wrong, but only the first is caught
+        by a single round trip when the input happens to already be in
+        the host's preferred order.
+        """
+        src = _json_round_trip_src(json_text, times=3)
+        assert (
+            _parity_stdout(src, tmp_path, f"jsonkeyidem_{case_id}") == expected
+        )
+
+    def test_constructed_object_keeps_its_build_order(
+        self, tmp_path: Path,
+    ) -> None:
+        """A ``JObject`` the program *built* rather than parsed.
+
+        A round trip cannot tell "both sides were fixed" from "neither
+        was": two compensating reorderings cancel, and the parse side's
+        ascending-index order happens to be a fixed point of the
+        stringify side's.  This case has no parse side at all — the map
+        is built by ``map_insert`` in Vera, so the bucket order is the
+        program's, and only ``readJson`` plus the serialiser stand
+        between it and the output.
+        """
+        src = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
-  IO.print(round_trip("[1,2]"))
+  let @Map<String, Json> = map_insert(map_insert(map_insert(
+    map_new(), "b", JNumber(1.0)), "3", JNumber(2.0)), "a", JNumber(3.0));
+  IO.print(json_stringify(JObject(@Map<String, Json>.0)))
 }
 """
-        native, browser = _both_stdouts(src, tmp_path, "json_parity")
-        assert native == "[1.0, 2.0]"
-        # Known divergence, deliberately not fixed on a tests-only branch:
-        # bare JSON.stringify gives compact separators and integral numbers.
-        assert browser == "[1,2]"
+        assert (
+            _parity_stdout(src, tmp_path, "jsonbuiltorder")
+            == '{"b":1,"3":2,"a":3}'
+        )
+
+
+class TestBrowserJsonStringifyNonFinite1293:
+    """A non-finite ``JNumber`` refuses to serialise on BOTH hosts (#1293).
+
+    RFC 8259 has no NaN and no Infinity, so there is no right answer to
+    return — only a right way to fail.  The native host has always
+    refused; the browser silently emitted ``null``, turning a value the
+    format cannot carry into a *different, valid* value that no later
+    consumer can tell from a genuine JSON ``null``.  That is the silent
+    wrong answer DESIGN §Design principles 2 rules out, and it is the
+    asymmetry #1293 folds in beside the formatting axes.
+
+    The assertion is deliberately two-sided: the call must raise, **and**
+    nothing may reach stdout.  Asserting only "raises" would still pass a
+    host that printed ``null`` and then failed for some later reason.
+    """
+
+    _SRC = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(json_stringify(JNumber({expr})))
+}}
+"""
+
+    @pytest.mark.parametrize(
+        ("case_id", "expr", "rendered"),
+        [
+            ("nan", "nan()", "NaN"),
+            ("infinity", "infinity()", "Infinity"),
+            ("negative_infinity", "0.0 - infinity()", "-Infinity"),
+        ],
+    )
+    def test_non_finite_fails_on_both_hosts(
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        native, browser = _both_failures(
+            self._SRC.format(expr=expr), tmp_path, f"jsonnf_{case_id}",
+        )
+        # The WHOLE sentence, taken from the reference implementation, so
+        # the browser's hand-copied duplicate in ``runtime.mjs`` is held
+        # against the original rather than against a shared fragment
+        # short enough for both to satisfy while saying different things
+        # — including the value's own spelling ("NaN" / "Infinity" /
+        # "-Infinity"), which each host derives independently.
+        expected = _non_finite_message(rendered)
+        assert "not representable in JSON" in expected  # guards the guard
+        # Substring, not equality: wasmtime and the Node harness each
+        # wrap the host message in a frame of their own.
+        assert expected in native, native
+        assert expected in browser, browser
+
+
+# The four probe inputs from #1306's table, plus the container and
+# multi-constant shapes that pin how far the refusal reaches and which
+# constant names it.
+_JSON_NON_FINITE_CASES = [
+    ("bare_nan", "NaN", "NaN"),
+    ("bare_infinity", "Infinity", "Infinity"),
+    ("bare_negative_infinity", "-Infinity", "-Infinity"),
+    ("nan_in_array", "[NaN]", "NaN"),
+    ("infinity_in_object", '{"a":Infinity}', "Infinity"),
+    ("negative_infinity_in_object", '{"a":-Infinity}', "-Infinity"),
+    ("first_of_two_wins", "[NaN,Infinity]", "NaN"),
+]
+
+# Positions × escape casings for #1308: keys as well as values, nested
+# anywhere, either spelling of the hex digits.
+_JSON_LONE_SURROGATE_CASES = [
+    ("value_lower", '{"k":"a\\ud800b"}', 0xD800),
+    ("value_upper", '{"k":"a\\uD800b"}', 0xD800),
+    ("value_low_surrogate", '{"k":"a\\udc00b"}', 0xDC00),
+    ("key", '{"a\\ud800b":1}', 0xD800),
+    ("key_upper", '{"a\\uD800b":1}', 0xD800),
+    ("array_element", '["a\\ud800b"]', 0xD800),
+    ("nested_object", '{"o":{"k":"a\\ud800b"}}', 0xD800),
+    ("nested_array_in_object", '{"o":[1,"a\\ud800b"]}', 0xD800),
+    ("top_level_string", '"a\\ud800b"', 0xD800),
+    ("high_then_ascii_escape", '{"k":"\\ud800\\u0041"}', 0xD800),
+    ("high_then_high", '{"k":"\\ud800\\ud800"}', 0xD800),
+    ("low_then_valid_pair", '{"k":"\\udc00\\ud83d\\ude00"}', 0xDC00),
+]
+
+# The boundary the #1308 refusal must not overshoot, and the documents
+# neither refusal may touch.
+_JSON_ACCEPTED_CASES = [
+    ("paired_surrogate_value", '{"k":"a\\ud83d\\ude00b"}', '{"k":"a\U0001F600b"}'),
+    ("paired_surrogate_upper", '{"k":"a\\uD83D\\uDE00b"}', '{"k":"a\U0001F600b"}'),
+    ("paired_surrogate_key", '{"a\\ud83d\\ude00b":1}', '{"a\U0001F600b":1}'),
+    ("two_pairs", '["\\ud83d\\ude00\\ud83d\\ude80"]', '["\U0001F600\U0001F680"]'),
+    ("pair_at_end", '{"k":"ab\\ud83d\\ude00"}', '{"k":"ab\U0001F600"}'),
+    ("literal_astral", '{"k":"\U0001F600"}', '{"k":"\U0001F600"}'),
+    ("nan_as_string_value", '{"k":"NaN"}', '{"k":"NaN"}'),
+    ("infinity_as_string_value", '{"k":"Infinity"}', '{"k":"Infinity"}'),
+    ("nan_as_key", '{"NaN":1}', '{"NaN":1}'),
+    ("negative_number", "-1.5", "-1.5"),
+    ("object_and_array", '{"a":1,"b":[true,null]}', '{"a":1,"b":[true,null]}'),
+    ("escaped_backslash_u", '{"k":"\\\\ud800"}', '{"k":"\\\\ud800"}'),
+]
+
+
+# A syntactically valid number that overflows Float64 — the second entry
+# route to a non-finite JNumber, and the one the constant refusal alone
+# left open on BOTH hosts.
+_JSON_OVERFLOW_CASES = [
+    ("bare", "1e999", "Infinity"),
+    ("bare_negative", "-1e999", "-Infinity"),
+    ("in_array", "[1e999]", "Infinity"),
+    ("in_object", '{"a":1e309}', "Infinity"),
+    ("capital_exponent", "1E999", "Infinity"),
+    ("doubly_nested", "[[1e999]]", "Infinity"),
+    ("negative_in_object", '{"a":-1e999}', "-Infinity"),
+]
+
+# Finite boundary controls, underflow among them: 1e-999 decodes to 0,
+# which is finite and in the domain.
+_JSON_FINITE_BOUNDARY_CASES = [
+    ("max_float", "1e308", "1e+308"),
+    ("negative_max_float", "-1e308", "-1e+308"),
+    ("largest_representable", "1.7976931348623157e308",
+     "1.7976931348623157e+308"),
+    ("underflow_to_zero", "1e-999", "0"),
+    ("underflow_in_array", "[1e-999]", "[0]"),
+]
+
+# Text that is malformed for a reason the domain has nothing to say
+# about.  Each must keep its host-native syntax message on both hosts —
+# these are where a scan that matched a constant token anywhere, rather
+# than only where a value may begin, would manufacture a shared sentence
+# on one host and not the other.
+_JSON_HOST_NATIVE_ERROR_CASES = [
+    ("malformed", "{not json"),
+    ("constant_lookalike", "[Infinity_x]"),
+    ("nan_lookalike", "[NaNx]"),
+    ("constant_as_bare_key", "{Infinity:1}"),
+    ("signed_nan", "-NaN"),
+    ("signed_nan_in_array", "[-NaN]"),
+    ("plus_infinity", "+Infinity"),
+    ("lowercase_infinity", "infinity"),
+    ("lowercase_nan", "nan"),
+    ("constant_suffix", "-Infinityx"),
+]
+
+
+# The integer arm of the overflow route.  ``json.loads`` yields a Python
+# ``int`` for a digit string with no fraction or exponent, so these never
+# reach a float range check on the reference host; ``JSON.parse`` has no
+# such split and produced an ``Infinity`` here all along.  The bound is
+# the double ROUNDING boundary — an integer above ``sys.float_info.max``
+# but below the midpoint to 2**1024 rounds down and is accepted by both.
+
+_JSON_INT_OVERFLOW_CASES = [
+    ("digits_309", "1" + "0" * 309, "Infinity"),
+    ("digits_400", "1" + "0" * 400, "Infinity"),
+    ("negative_309", "-1" + "0" * 309, "-Infinity"),
+    ("in_array", "[1" + "0" * 309 + "]", "Infinity"),
+    ("in_object", '{"a":1' + "0" * 309 + "}", "Infinity"),
+    ("exact_rounding_boundary", str(INT_ROUNDS_TO_INFINITY), "Infinity"),
+]
+
+_JSON_INT_ACCEPTED_CASES = [
+    ("digits_308", "1" + "0" * 308, "1e+308"),
+    ("negative_digits_308", "-1" + "0" * 308, "-1e+308"),
+    ("boundary_minus_one", str(INT_ROUNDS_TO_INFINITY - 1),
+     "1.7976931348623157e+308"),
+    ("max_finite_as_int_plus_one", str(MAX_FINITE_AS_INT + 1),
+     "1.7976931348623157e+308"),
+    ("ordinary_integer", "42", "42"),
+]
+
+
+class TestBrowserJsonAcceptDomainParity1306_1308:
+    """``json_parse`` accepts the same texts on both hosts (#1306, #1308).
+
+    Three exclusions, and only one of them was a disagreement BETWEEN
+    the hosts.  For the JavaScript constants the reference host was the
+    lax one — Python's ``json.loads`` admits ``NaN`` / ``Infinity`` /
+    ``-Infinity`` through its default ``parse_constant``, so the text
+    parsed and the refusal landed at ``json_stringify`` instead, a
+    *different call* from the browser's (#1306).
+
+    The other two diverged from the stated domain on BOTH hosts at once,
+    which is the harder shape to notice because a parity suite sees
+    nothing wrong.  A lone-surrogate escape was accepted by both parsers
+    and the memory boundary decided what happened next — ``TextEncoder``
+    substituted U+FFFD in the browser, ``.encode()`` raised in the
+    reference host (#1308).  A number that overflows (``1e999``) is
+    accepted by both parsers as well, decoding to an infinite
+    ``JNumber`` on each, and then dying at ``json_stringify`` on each
+    (#1306 again, by a second entry route).
+
+    Vera's own domain now settles all three, at one refusal point:
+    ``json_parse`` accepts exactly RFC 8259-valid text that decodes to
+    finite numbers and strings of Unicode scalar values.
+
+    Every case runs the SAME ``.wasm`` under both runtimes and compares
+    the full stdout, so the assertion covers the arm taken *and* the
+    message — and the expected message is imported from the reference
+    implementation, holding ``runtime.mjs``'s hand-copied duplicate
+    against the original rather than against a fragment loose enough for
+    both to satisfy while saying different things.
+    """
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_NON_FINITE_CASES,
+        ids=[c[0] for c in _JSON_NON_FINITE_CASES],
+    )
+    def test_non_finite_constants_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonnfp_{case_id}",
+        )
+        assert out == err(non_finite_parse_message(name))
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "code_point"),
+        _JSON_LONE_SURROGATE_CASES,
+        ids=[c[0] for c in _JSON_LONE_SURROGATE_CASES],
+    )
+    def test_lone_surrogates_refused_identically(
+        self, case_id: str, raw_json: str, code_point: int, tmp_path: Path,
+    ) -> None:
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonls_{case_id}",
+        )
+        assert out == err(lone_surrogate_message(code_point))
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_ACCEPTED_CASES,
+        ids=[c[0] for c in _JSON_ACCEPTED_CASES],
+    )
+    def test_accepted_documents_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Controls, run beside the refusals rather than in another file.
+
+        A paired surrogate escape is the ordinary way to write an astral
+        character, and ``"NaN"`` as a string value is ordinary JSON — a
+        refusal that reached either of them would break real documents,
+        and would still look like a pass to a battery that only asserted
+        the refusals fire.
+        """
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonok_{case_id}",
+        )
+        assert out == ok(expected)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_OVERFLOW_CASES,
+        ids=[c[0] for c in _JSON_OVERFLOW_CASES],
+    )
+    def test_overflow_to_infinity_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        """The route the constant refusal left open, on both hosts.
+
+        ``1e999`` is grammatically valid RFC 8259 that ``json.loads``
+        and ``JSON.parse`` both accept, decoding to an infinite number
+        on each — so before this the domain's "no non-finite value gets
+        in" claim was false in the same way on both hosts, and the
+        program died at ``json_stringify`` instead.
+        """
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonovf_{case_id}",
+        )
+        assert out == err(non_finite_number_message(name))
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_FINITE_BOUNDARY_CASES,
+        ids=[c[0] for c in _JSON_FINITE_BOUNDARY_CASES],
+    )
+    def test_finite_numbers_at_the_boundary_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Including underflow, which is a different question.
+
+        ``1e-999`` names a value neither host can represent either, but
+        what it decodes to is ``0`` — finite, and in the domain.  A
+        refusal generalised from "the text names an unrepresentable
+        magnitude" rather than from "the decoded number is not finite"
+        would take it.
+        """
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonfin_{case_id}",
+        )
+        assert out == ok(expected)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "name"),
+        _JSON_INT_OVERFLOW_CASES,
+        ids=[c[0] for c in _JSON_INT_OVERFLOW_CASES],
+    )
+    def test_integer_overflow_refused_identically(
+        self, case_id: str, raw_json: str, name: str, tmp_path: Path,
+    ) -> None:
+        """The route only the reference host had a hole in.
+
+        A digit string with no fraction and no exponent decodes to a
+        Python ``int``, which a float-only range check never examined —
+        and then had to become an f64 at the WASM boundary, where the
+        conversion raised.  ``JSON.parse`` produces a double either way,
+        so the browser side of this parity assertion was already right;
+        what it pins is that the reference host now says the same
+        sentence rather than dying with a CPython one.
+        """
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonint_{case_id}",
+        )
+        assert out == err(non_finite_number_message(name))
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json", "expected"),
+        _JSON_INT_ACCEPTED_CASES,
+        ids=[c[0] for c in _JSON_INT_ACCEPTED_CASES],
+    )
+    def test_integers_that_round_into_range_are_unchanged(
+        self, case_id: str, raw_json: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """The boundary pair, and the band between the two candidate bounds.
+
+        ``max_finite_as_int_plus_one`` is larger than the largest finite
+        double and still rounds to it, so both hosts accept it.  A
+        reference-host bound of ``sys.float_info.max`` would refuse it
+        and trade one divergence for its mirror image — invisible to any
+        battery whose only large case is a round number of zeros.
+        """
+        out = _parity_stdout(
+            accept_domain_src(raw_json), tmp_path, f"jsonintok_{case_id}",
+        )
+        assert out == ok(expected)
+
+    @pytest.mark.parametrize(
+        ("case_id", "raw_json"),
+        _JSON_HOST_NATIVE_ERROR_CASES,
+        ids=[c[0] for c in _JSON_HOST_NATIVE_ERROR_CASES],
+    )
+    def test_malformed_text_keeps_its_host_native_message(
+        self, case_id: str, raw_json: str, tmp_path: Path,
+    ) -> None:
+        """Only the domain refusals are shared sentences.
+
+        Syntax errors keep their host-native message — Python ``json``
+        on one side, ECMAScript ``JSON`` on the other — the long-standing
+        convention ``TestBrowserHostErrorPaths349`` documents.  The
+        browser reaches its shared sentence by asking whether stripping
+        the bare constants makes the text parse, and it only considers a
+        token where a value may begin; ``-NaN`` is the case that needs
+        both rules, since the substitution alone would turn it into
+        ``-0`` and report a refusal the reference host never makes.
+        """
+        native, browser = _both_stdouts(
+            accept_domain_src(raw_json), tmp_path, f"jsonsyn_{case_id}",
+        )
+        assert native.startswith(ERR_PREFIX)
+        assert browser.startswith(ERR_PREFIX)
+        assert "json_parse:" not in native, native
+        assert "json_parse:" not in browser, browser
+
+    def test_a_non_finite_constant_outranks_a_lone_surrogate(
+        self, tmp_path: Path,
+    ) -> None:
+        """Precedence, pinned, because the two hosts reach it differently.
+
+        The reference host never gets to the surrogate scan — the
+        constant makes ``json.loads`` itself raise.  The browser never
+        gets to ``parseJsonOrdered`` — ``JSON.parse`` refused the text.
+        Both arrive at the non-finite sentence, but only a test says so.
+        """
+        out = _parity_stdout(
+            accept_domain_src('["\\ud800",NaN]'), tmp_path, "jsonprec",
+        )
+        assert out == err(non_finite_parse_message("NaN"))
+
+    def test_the_two_walk_refusals_share_one_document_order(
+        self, tmp_path: Path,
+    ) -> None:
+        """Overflow and lone surrogate are found by ONE walk, both hosts.
+
+        Both are properties of the decoded value, so both are found by
+        the same document-order traversal and whichever comes first
+        names the refusal.  Two hosts each with its own precedence rule
+        would agree on every single-violation document and diverge only
+        here.
+        """
+        assert _parity_stdout(
+            accept_domain_src('["a\\ud800b",1e999]'), tmp_path, "jsonwalk1",
+        ) == err(lone_surrogate_message(0xD800))
+        assert _parity_stdout(
+            accept_domain_src('[1e999,"a\\ud800b"]'), tmp_path, "jsonwalk2",
+        ) == err(non_finite_number_message("Infinity"))
+
+
+class TestCanonicalNumberFormatMatchesEcmascript1293:
+    """``format_json_number`` is differentially checked against the real
+    ``JSON.stringify``, not against a table someone typed (#1293).
+
+    The reference host now renders numbers itself instead of delegating
+    to ``json.dumps``, so "matches ECMAScript" became a claim about a
+    reimplementation.  A hand-written boundary table — which
+    ``TestCanonicalNumberFormat`` in ``tests/test_codegen_json.py`` also
+    has — only proves the cases its author thought of, and those are the
+    cases the implementation was written to handle.  This runs the two
+    implementations against each other over a deterministic random
+    sample of doubles drawn from raw bit patterns, so the inputs are not
+    ones either side was designed around.
+    """
+
+    @staticmethod
+    def _ecmascript_strings(values: list[float], tmp_path: Path) -> list[str]:
+        """``JSON.stringify(n)`` for each value, computed by Node."""
+        literals = [repr(v) for v in values]
+        script = tmp_path / "numfmt.mjs"
+        script.write_text(
+            "const xs = " + json.dumps(literals) + ";\n"
+            "console.log(JSON.stringify("
+            "xs.map(s => JSON.stringify(Number(s)))));\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [NODE or "node", str(script)],
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=60, check=True,
+        )
+        return list(json.loads(proc.stdout))
+
+    def test_random_doubles_match_json_stringify(self, tmp_path: Path) -> None:
+        # Seeded: a flaky parity test is worse than a smaller sample.
+        rng = random.Random(20260813)
+        values: list[float] = []
+        while len(values) < 2000:
+            bits = rng.getrandbits(64)
+            (candidate,) = struct.unpack("<d", struct.pack("<Q", bits))
+            if math.isfinite(candidate):
+                values.append(candidate)
+        # Mix in magnitudes the uniform bit sampler almost never lands
+        # on: small integers and the exponential thresholds.
+        values.extend(float(i) for i in range(-50, 51))
+        values.extend([
+            1e-7, 1e-6, 1e15, 1e16, 1e20, 1e21, 1e30, 5e-324,
+            1.7976931348623157e308, 0.1, 0.5, 1.5, -0.0,
+        ])
+
+        expected = self._ecmascript_strings(values, tmp_path)
+        # A short Node reply would otherwise truncate the comparison
+        # silently: a bare ``zip`` stops at the shorter input, so a
+        # harness that returned the first ten strings and died would
+        # read as ten passes rather than one failure.  Both the length
+        # assertion and ``strict=True`` are here because they catch it
+        # at different points — the assertion names the shortfall, and
+        # ``strict`` also guards a future refactor that builds the two
+        # lists separately.
+        assert len(expected) == len(values), (
+            f"Node returned {len(expected)} strings for {len(values)} "
+            f"doubles; the differential would have compared only the "
+            f"common prefix"
+        )
+        mismatches = [
+            (v, format_json_number(v), want)
+            for v, want in zip(values, expected, strict=True)
+            if format_json_number(v) != want
+        ]
+        assert not mismatches, (
+            f"{len(mismatches)} of {len(values)} doubles render differently "
+            f"from JSON.stringify; first five: {mismatches[:5]}"
+        )
+
+    def test_the_differential_can_fail(self, tmp_path: Path) -> None:
+        """The differential above is only evidence if it can go red.
+
+        ``repr`` is what the old ``json.dumps`` path emitted, and it is
+        the natural wrong answer here, so the check that would have
+        passed the pre-#1293 implementation is run explicitly and
+        required to FAIL.  Without this, a broken Node invocation or an
+        empty sample would make the differential vacuously green.
+        """
+        values = [1.0, 1e16, 1e-7, -0.0]
+        expected = self._ecmascript_strings(values, tmp_path)
+        assert expected == ["1", "10000000000000000", "1e-7", "0"]
+        assert [repr(v) for v in values] != expected
 
 
 class TestBrowserHostErrorPaths349:
@@ -3706,14 +4554,14 @@ class TestBrowserMarkdownNesting349:
     run when a heading or fence is nested inside another block.
     ``examples/markdown.vera`` is flat, so none of them ever ran.
 
-    ``md_render`` diverges on exactly this input — see
-    :class:`TestBrowserMarkdownRenderParity349` — so the rendered
-    prefix is asserted browser-side only.  The three parse-side fields
-    behind it are host-agnostic, and that is *checked* rather than
-    asserted in prose: the same module runs under both runtimes and the
-    trailing fields are compared.  It is the claim #1294 rests on when
-    it scopes the defect to the renderer, so it needs a differential,
-    not a docstring.
+    ``md_render`` used to diverge on exactly this input (#1294), so the
+    rendered prefix was asserted browser-side only.  It now agrees, and
+    the whole string is compared across the two runtimes.  The three
+    parse-side fields are still checked separately as well — each host's
+    against the expected values, since the whole-string equality already
+    makes the two sides the same text: they were the control that scoped
+    #1294 to the renderer, and keeping them named means a future
+    renderer regression cannot be mistaken for a parser one.
     """
 
     # A blockquote wrapping an h2 and a fenced block, so the recursive
@@ -3738,121 +4586,509 @@ public fn main(@Unit -> @Unit)
 
     def test_nested_walks_and_list_continuations(self, tmp_path: Path) -> None:
         native, browser = _both_stdouts(self._SRC, tmp_path, "md_nesting")
+        # Whole string, renderer included, since #1294 closed.
+        assert browser == native
         rendered, has_h2, has_py, n_blocks = browser.rsplit("|", 3)
-        # The parse-side fields must be byte-identical across the two
-        # runtimes; only the rendered prefix is allowed to diverge.
-        assert native.rsplit("|", 3)[1:] == [has_h2, has_py, n_blocks]
-        # Continuation lines survived the per-item loop in both list kinds.
-        assert "continued" in rendered
-        assert "also one" in rendered
-        # Recursive descents found the h2 and the fence inside the quote.
-        assert (has_h2, has_py, n_blocks) == ("true", "true", "1")
+        # The parse-side fields kept as a named control: they are what
+        # scoped #1294 to the renderer, so a future divergence can still
+        # be told apart from a parser one.  Each host is held against
+        # the EXPECTED values, not against the other one (#1303 review):
+        # the equality above already makes the two strings identical, so
+        # a second cross-host comparison of fields sliced out of them
+        # asserts nothing at all.
+        expected_fields = ["true", "true", "1"]
+        assert native.rsplit("|", 3)[1:] == expected_fields
+        assert [has_h2, has_py, n_blocks] == expected_fields
+        # Continuation lines survived the per-item loop in both list kinds
+        # *and* stayed inside their item, which is the renderer's half.
+        assert "- first continued" in rendered
+        assert "1. one also one" in rendered
+
+
+_MD_ROUND_TRIP_PRELUDE = r"""
+private fn md_round_trip(@String -> @String)
+  requires(true) ensures(true) effects(pure)
+{
+  match md_parse(@String.0) {
+    Ok(@MdBlock) -> md_render(@MdBlock.0),
+    Err(@String) -> string_concat("ERR:", @String.0)
+  }
+}
+"""
+
+
+def _md_round_trip_src(markdown: str, *, times: int = 1) -> str:
+    """A ``main`` that runs ``markdown`` through ``md_render ∘ md_parse``
+    ``times`` times and prints the result.
+
+    ``markdown`` is written as it appears inside a Vera string literal —
+    ``\n`` as the two characters, which Vera's lexer turns into a
+    newline.
+    """
+    inner = 'md_round_trip("' + markdown + '")'
+    for _ in range(times - 1):
+        inner = f"md_round_trip({inner})"
+    return _MD_ROUND_TRIP_PRELUDE + f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print({inner})
+}}
+"""
+
+
+# (id, Markdown as written in a Vera string literal, canonical render).
+# The four cases #1294 measured across the two hosts, in the order its
+# table lists them.
+_MD_RENDER_CASES = [
+    ("list_continuation", r"- first\n  continued\n", "- first continued"),
+    ("blockquote_pair", r"> a\n> b\n", "> a b"),
+    (
+        "nested_bq_fence",
+        r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n",
+        # The bare `>` between the quote's two children survives the
+        # round trip since the #1294 review; the render is now the
+        # input back, byte for byte, minus the trailing newline.
+        "> ## Quoted\n>\n> ```py\n> x = 1\n> ```",
+    ),
+    ("plain_paragraph", r"hello\nworld\n", "hello world"),
+    # A quote holding two paragraphs — the shape whose separator the
+    # reference renderer dropped, merging them into one on re-parse.
+    ("blockquote_two_paragraphs", r"> a\n>\n> b\n", "> a\n>\n> b"),
+]
+
+# Corpus for the §9.7.3 round-trip property.  The first eight mirror
+# ``TestRoundTrip`` in ``tests/test_markdown.py``, so the two runtimes
+# are held to the corpus the reference renderer is already held to; the
+# rest are the container/multi-line shapes #1294 was about, which that
+# corpus has none of — every one of its eight entries is single-line or
+# fence-only, which is exactly why a renderer that dropped container
+# prefixes passed it.
+_MD_ROUND_TRIP_CORPUS = [
+    ("heading", r"# Hello"),
+    ("paragraph", r"Some text here."),
+    ("fence", r"```python\nprint(42)\n```"),
+    ("thematic_break", r"---"),
+    ("unordered_list", r"- item 1\n- item 2"),
+    ("ordered_list", r"1. first\n2. second"),
+    ("blockquote", r"> quoted"),
+    ("table", r"| A | B |\n| --- | --- |\n| 1 | 2 |"),
+    ("list_continuation", r"- first\n  continued\n"),
+    ("ordered_continuation", r"1. one\n   also one\n2. two\n"),
+    ("blockquote_pair", r"> a\n> b\n"),
+    ("nested_bq_fence", r"> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n"),
+    ("plain_paragraph", r"hello\nworld\n"),
+    # Multi-child containers — the shape whose separator the reference
+    # renderer dropped (#1294 review).
+    ("blockquote_two_paragraphs", r"> a\n>\n> b\n"),
+    ("blockquote_para_then_list", r"> a\n>\n> - b\n> - c\n"),
+    ("blockquote_three_children",
+     r"> # H\n>\n> para\n>\n> ```py\n> x = 1\n> ```\n"),
+    # Lazy continuation: an unmarked line continues the quote.
+    ("blockquote_lazy_continuation", r"> a\nb\n"),
+    ("blockquote_no_space", r">no space\n"),
+    # An empty container: it has to survive its own render or the block
+    # disappears and the document's spacing goes with it.
+    ("blockquote_empty", r"---\n>\n"),
+    ("blockquote_empty_between", r"> a\n\n>\n\n> b\n"),
+    # A code span whose content holds a backtick — the shape that tells
+    # a run-length scan apart from a next-single-backtick scan.
+    ("code_span_interior_tick", r"``a`b``"),
+    ("quoted_list", r"> - a\n>   b\n> - c\n"),
+    ("quoted_multiline_fence", r"> ```sh\n> one\n> two\n> ```\n"),
+    ("list_with_fence", r"- item\n  ```py\n  a = 1\n  b = 2\n  ```\n"),
+    ("inlines", r"*em* and **strong** and `code` in one line\n"),
+    ("link_and_image", r"[text](http://example.com) then ![alt](img.png)\n"),
+    (
+        "multi_block_document",
+        r"# Title\n\nIntro line\ncontinued here.\n\n> note one\n> note two"
+        r"\n\n- a\n  b\n- c\n\n```rs\nfn one() {}\nfn two() {}\n```\n\n---\n",
+    ),
+]
 
 
 class TestBrowserMarkdownRenderParity349:
-    """``md_render`` diverges from the native runtime on any multi-line
-    paragraph (#349 finding, tracked as #1294).
+    """``md_render`` agrees with the reference renderer and is a fixed
+    point (#349 finding, tracked as #1294, closed).
 
-    The rule is not "list lazy continuations" — that was the first case
-    found, not the scope.  The browser preserves a paragraph's internal
-    soft line breaks and does not re-apply the container prefix (``> ``,
-    list-item indent) on output, where the native renderer collapses
-    them to spaces.  A bare ``hello\\nworld`` paragraph diverges too.
-
-    Worse, the browser render is **not stable**: re-rendering its own
-    output moves the continuation out of its container (``> a b`` →
-    ``> a\\nb`` → ``> a\\n\\nb``, where ``b`` is no longer quoted), so
-    the browser breaks the round-trip property spec §9.7.6 states for
-    ``md_render`` itself, as well as §12.9.3's identical-results
-    requirement.  The native renderer is a fixed point on every case
-    below.  Parsing is unaffected — ``md_has_heading`` /
-    ``md_has_code_block`` / ``md_extract_code_blocks`` are byte-identical
-    across the runtimes — so the defect is scoped to the renderer in
-    ``vera/browser/runtime.mjs``.
+    The browser used to preserve a paragraph's internal soft line breaks
+    and not re-apply the container prefix (``> ``, list-item indent) on
+    output, where the reference renderer collapses the breaks to spaces
+    and prefixes every line of every child.  The scope was any
+    multi-line paragraph, not the list lazy continuation first observed,
+    and the render was **not stable**: re-rendering its own output moved
+    content out of its container (``> a b`` → ``> a\\nb`` →
+    ``> a\\n\\nb``), so it broke both the round-trip property spec §9.7.3
+    states for ``md_render`` and §12.9.3's identical-results requirement.
+    On a blockquote wrapping a heading and a fenced block it destroyed
+    the document outright the second time round.
 
     ``examples/markdown.vera`` is flat enough to miss all of it, and
-    nothing else rendered Markdown under Node, so the divergence has
-    never been caught.
-
-    Both sides are pinned as exact strings rather than marked ``xfail``
-    for the same reason as ``TestBrowserJsonStringifyParity349``: a bare
-    ``xfail`` would swallow a compile failure, a dead Node harness or an
-    unrelated ``runtime.mjs`` regression, and this is the only
-    browser-side coverage of ``md_render``.
+    nothing else rendered Markdown under Node, which is why it went
+    uncaught.  The battery below is therefore three-layered — cross-host
+    equality, an exact expected string, and stability under re-render —
+    because equality alone would pass two hosts that agree on the wrong
+    answer, and an exact string alone would pass a renderer that is
+    correct once and drifts on the second pass.
     """
 
-    def test_lazy_continuation(self, tmp_path: Path) -> None:
-        src = r"""
-public fn main(@Unit -> @Unit)
-  requires(true) ensures(true) effects(<IO>)
-{
-  match md_parse("- first\n  continued\n") {
-    Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
-}
-"""
-        native, browser = _both_stdouts(src, tmp_path, "md_parity")
-        assert native == "- first continued"
-        # Known divergence, deliberately not fixed on a tests-only branch:
-        # the browser's parseBlocks keeps the continuation as its own line.
-        assert browser == "- first\ncontinued"
+    @pytest.mark.parametrize(
+        ("case_id", "markdown", "expected"),
+        _MD_RENDER_CASES,
+        ids=[c[0] for c in _MD_RENDER_CASES],
+    )
+    def test_render_matches_across_hosts(
+        self, case_id: str, markdown: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Byte-identical across the hosts, and equal to the reference
+        renderer's answer written out."""
+        src = _md_round_trip_src(markdown)
+        assert _parity_stdout(src, tmp_path, f"md1_{case_id}") == expected
 
-    def test_blockquote_fence_render_is_destructive(self, tmp_path: Path) -> None:
-        """The nesting battery's blockquote — an h2 and a fenced block
-        inside ``> `` — pinned end to end, because this is the case where
-        the instability stops being cosmetic and destroys the document.
+    @pytest.mark.parametrize(
+        ("case_id", "markdown", "expected"),
+        _MD_RENDER_CASES,
+        ids=[c[0] for c in _MD_RENDER_CASES],
+    )
+    def test_render_is_stable_under_re_render(
+        self, case_id: str, markdown: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """Rendering the render changes nothing, on both hosts.
 
-        The battery above computes this render but only substring-asserts
-        it, so the exact strings were unpinned.  Rendering once already
-        strips the ``> `` from the fence's contents in the browser;
-        rendering *that* output again fragments the fence into three and
-        lifts ``x = 1`` clean out of the quote, at which point no
-        subsequent parse can recover the original document.  The native
-        renderer returns the same bytes both times.
-
-        A renderer fix moves at least one of these pins, which is the
-        intent: it must go red and be updated deliberately rather than
-        drifting silently.
+        This is where the browser's defect stopped being cosmetic: the
+        nested blockquote's second render fragmented the fence into
+        three and lifted ``x = 1`` clean out of the quote, past recovery
+        by any subsequent parse.
         """
-        one = r"""
+        src = _md_round_trip_src(markdown, times=2)
+        assert _parity_stdout(src, tmp_path, f"md2_{case_id}") == expected
+
+    @pytest.mark.parametrize(
+        ("case_id", "markdown"),
+        _MD_ROUND_TRIP_CORPUS,
+        ids=[c[0] for c in _MD_ROUND_TRIP_CORPUS],
+    )
+    def test_round_trip_property_holds_on_both_hosts(
+        self, case_id: str, markdown: str, tmp_path: Path,
+    ) -> None:
+        """``md_parse(md_render(b)) == Ok(b)`` (spec §9.7.3), in its
+        observable form.
+
+        Vera has no structural equality on ``MdBlock``, so the property
+        is exercised through the one channel a Vera program can see:
+        ``md_render`` composed with ``md_parse`` reaches a fixed point
+        after the first application.  If a round trip lost or moved
+        structure, the second render would differ from the first — which
+        is exactly how the browser's blockquote failure showed up.  Both
+        hosts must reach the *same* fixed point, so this is a parity
+        assertion as well as a property one.
+        """
+        once = _parity_stdout(
+            _md_round_trip_src(markdown), tmp_path, f"mdrt1_{case_id}",
+        )
+        twice = _parity_stdout(
+            _md_round_trip_src(markdown, times=2), tmp_path,
+            f"mdrt2_{case_id}",
+        )
+        assert twice == once
+        assert not once.startswith("ERR:"), once
+
+
+class TestBrowserMarkdownRenderConstructedAdt1294:
+    """``md_render`` on ADTs a Vera program *built*, not parsed (#1294).
+
+    Every other Markdown case in this file reaches the renderer through
+    ``md_parse``, so it can only exercise the shapes the parser happens
+    to produce.  ``MdBlock`` and ``MdInline`` are ordinary prelude ADTs
+    a program can construct directly, and those values reach the same
+    host import — so a renderer rule that only the parser never triggers
+    is still reachable, and still has to agree across the two hosts.
+    """
+
+    @pytest.mark.parametrize(("case_id", "code", "rendered"), [
+        ("plain", "code", "`code`"),
+        ("one_backtick", "a`b", "``a`b``"),
+        ("two_backticks", "a``b", "```a``b```"),
+        ("leading_backtick", "`x", "`` `x ``"),
+        ("trailing_backtick", "x`", "`` x` ``"),
+    ])
+    def test_code_span_fence(
+        self, case_id: str, code: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """The fence is one backtick longer than the content's longest
+        run, padded only when the content starts or ends with one.
+
+        Reachable only from a constructed ADT for the multi-backtick
+        cases, which is why the browser renderer was missing the rule
+        entirely while every parse-driven test passed — and why the
+        reference's own rule ("two backticks and padding") was wrong for
+        two backticks without anything noticing.
+        """
+        src = f"""
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
-{
-  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
+{{
+  IO.print(md_render(MdDocument([MdParagraph([MdCode("{code}")])])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_tick_{case_id}") == rendered
+
+    @pytest.mark.parametrize(("case_id", "source", "expected"), [
+        # Content WITH an interior backtick, so a scan that stops at the
+        # next single tick lands somewhere else.  ``` ``double`` ``` on
+        # its own does not distinguish the two scans: both recover
+        # "double", which is how a wrong parser passes a plausible test.
+        ("interior_tick", r"``a`b``", "``a`b``"),
+        ("plain_double", r"``double``", "`double`"),
+        # A three-backtick run at the start of a line is a BLOCK fence
+        # before any inline parsing happens, so this is an unterminated
+        # code block whose language tag is the rest of the line.  Both
+        # hosts agree on that, which is the claim here; that the shape
+        # is unrepresentable at line start is a limitation of the
+        # §9.7.3 subset, pinned natively in tests/test_markdown.py.
+        ("triple_is_a_block_fence", r"```a``b```", "```a``b```\n\n```"),
+    ])
+    def test_code_span_parses_by_run_length(
+        self, case_id: str, source: str, expected: str, tmp_path: Path,
+    ) -> None:
+        """``md_parse`` closes a span on a run of EQUAL length.
+
+        The browser scanned for the next single backtick, so
+        ``` ``a`b`` ``` closed on the interior tick and left the rest as
+        stray text — a parse divergence, not a render one, and the
+        reason the fence rule above needs the parser fixed in the same
+        change: without it the browser cannot read back its own output.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  match md_parse("{source}") {{
     Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
     Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
-}
+  }}
+}}
 """
-        native1, browser1 = _both_stdouts(one, tmp_path, "md_bq_once")
-        assert native1 == "> ## Quoted\n> ```py\n> x = 1\n> ```"
-        # The fence's contents lose the blockquote prefix in the browser.
-        assert browser1 == "> ## Quoted\n> ```py\nx = 1\n> ```"
+        assert _parity_stdout(src, tmp_path, f"md_span_{case_id}") == expected
 
-        # Render 2: md_render(md_parse(md_render(md_parse(src)))).
-        two = r"""
+    @pytest.mark.parametrize(("case_id", "code", "rendered"), [
+        ("both_ends", " x ", "`  x  `"),
+        ("all_spaces", "  ", "`    `"),
+        ("wider", "  x  ", "`   x   `"),
+        # One space is below the parser's two-character strip threshold,
+        # so it is neither stripped nor padded.
+        ("single_space", " ", "` `"),
+        # Space padding and backtick padding are one space, not two.
+        ("spaced_backticks", " `x` ", "``  `x`  ``"),
+        # Only one end is a space — nothing is stripped, nothing padded.
+        ("leading_only", " a", "` a`"),
+        ("trailing_only", "a ", "`a `"),
+    ])
+    def test_code_span_pads_space_bounded_content(
+        self, case_id: str, code: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """A span whose content starts *and* ends with a space (#1303
+        review).
+
+        Both parsers strip one such pair unconditionally, so without a
+        matching pad on the way out the content's own spaces are eaten:
+        ``MdCode(" x ")`` rendered ``` ` x ` ``` and read back as
+        ``MdCode("x")``.  Constructed, because the shape is unreachable
+        by parsing — the strip removes it on the way in — which is why
+        the round-trip corpus never produced it on either host.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([MdParagraph([MdCode("{code}")])])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_sp_{case_id}") == rendered
+
+    def test_code_span_padding_keeps_two_values_apart(
+        self, tmp_path: Path,
+    ) -> None:
+        """``MdCode(" `x` ")`` and ``MdCode("`x`")`` used to render to
+        the same bytes on both hosts, so the loss was not recoverable
+        even by guessing.  Asserted as a *difference*, which a pair of
+        per-value expected strings would not catch if both were equal.
+        """
+        src = """
 public fn main(@Unit -> @Unit)
   requires(true) ensures(true) effects(<IO>)
 {
-  match md_parse("> ## Quoted\n>\n> ```py\n> x = 1\n> ```\n") {
-    Ok(@MdBlock) -> match md_parse(md_render(@MdBlock.0)) {
-      Ok(@MdBlock) -> IO.print(md_render(@MdBlock.0)),
-      Err(@String) -> IO.print(string_concat("ERR2:", @String.0))
-    },
-    Err(@String) -> IO.print(string_concat("ERR:", @String.0))
-  }
+  IO.print(string_concat(
+    md_render(MdDocument([MdParagraph([MdCode(" `x` ")])])),
+    string_concat("|",
+      md_render(MdDocument([MdParagraph([MdCode("`x`")])])))))
 }
 """
-        native2, browser2 = _both_stdouts(two, tmp_path, "md_bq_twice")
-        # Native is a fixed point — re-rendering changes nothing.
-        assert native2 == native1
-        # The browser is not: the fence fragments and `x = 1` escapes the
-        # blockquote entirely.
-        assert browser2 == (
-            "> ## Quoted\n> ```py\n\n> ```\n\nx = 1\n\n> ```\n\n> ```"
+        out = _parity_stdout(src, tmp_path, "md_sp_distinct")
+        spaced, bare = out.split("|")
+        assert spaced != bare
+        assert (spaced, bare) == ("``  `x`  ``", "`` `x` ``")
+
+    @pytest.mark.parametrize(("case_id", "expr", "rendered"), [
+        ("only_item", "MdList(false, [[]])", "- "),
+        (
+            "empty_then_full",
+            'MdList(false, [[], [MdParagraph([MdText("b")])]])',
+            "- \n- b",
+        ),
+        # The ordered case corrupts silently: dropping the empty item
+        # renumbers every item after it.
+        (
+            "ordered_middle",
+            'MdList(true, [[MdParagraph([MdText("a")])], [], '
+            '[MdParagraph([MdText("c")])]])',
+            "1. a\n2. \n3. c",
+        ),
+    ])
+    def test_empty_list_item_keeps_its_place(
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """An item with no blocks is a value the *parser* produces —
+        ``- `` reads back as one empty item — so the renderer owes it a
+        form (#1303 review).  Both hosts dropped it, which deleted the
+        item and, in an ordered list, renumbered the rest.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([{expr}])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_ei_{case_id}") == rendered
+
+    @pytest.mark.parametrize(("case_id", "expr", "rendered"), [
+        ("list_then_para",
+         'MdList(false, []), MdParagraph([MdText("after")])', "after"),
+        ("para_then_list",
+         'MdParagraph([MdText("before")]), MdList(false, [])', "before"),
+        ("table_between",
+         'MdParagraph([MdText("a")]), MdTable([]), '
+         'MdParagraph([MdText("b")])', "a\n\nb"),
+    ])
+    def test_zero_line_child_takes_no_separator(
+        self, case_id: str, expr: str, rendered: str, tmp_path: Path,
+    ) -> None:
+        """A list with no items and a table with no rows render to
+        nothing, and must not drag the document separator in with them
+        (#1303 review).
+
+        Counting them left a blank line standing for an absent block,
+        which the next parse cannot attribute to anything — so the
+        render stopped being a fixed point.  The expected strings here
+        have no leading or interior stray blank line, which is what the
+        assertion is really about.
+        """
+        src = f"""
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{{
+  IO.print(md_render(MdDocument([{expr}])))
+}}
+"""
+        assert _parity_stdout(src, tmp_path, f"md_zl_{case_id}") == rendered
+
+    def test_empty_blockquote_still_occupies_a_line(
+        self, tmp_path: Path,
+    ) -> None:
+        """A quote with no children renders as a bare ``>``.
+
+        Rendering it as no lines at all makes the block vanish on
+        re-parse and turns the document's separator into a stray blank
+        line, so ``---\\n>`` came back as just ``---``.  Built directly
+        *and* exercised through the corpus round trip below, because the
+        constructed form is what pins the bytes and the parsed form is
+        what proves the parser agrees they are the same block.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdThematicBreak(), MdBlockQuote([])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_empty_bq") == "---\n\n>"
+
+    def test_multi_line_code_block_inside_a_blockquote(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every line of a container's child carries the prefix.
+
+        The single case that a first-line-only prefix cannot fake, and
+        the one whose second render destroyed the document.  Built
+        directly so the assertion is about the renderer alone.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdCodeBlock("sh", "one\\ntwo\\nthree")
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_fence_adt") == (
+            "> ```sh\n> one\n> two\n> three\n> ```"
         )
-        # Stated as a relation as well as two literals, so that updating
-        # both pins to one value — which is what a *partial* fix looks
-        # like — cannot quietly assert a stability the browser lacks.
-        assert browser2 != browser1
+
+    def test_nested_documents_separator_is_quoted(
+        self, tmp_path: Path,
+    ) -> None:
+        """A *nested ``MdDocument``* separates its blocks with a blank
+        line, and the enclosing quote turns that into a bare ``>``.
+
+        The separator here comes from the ``MdDocument`` arm, not the
+        blockquote arm — the quote has exactly one child.  What this
+        pins is the quoting of a child's blank line: an unquoted empty
+        line would end the quote on re-parse and split one blockquote
+        into two.  The blockquote arm's own separator is a different
+        rule with a different owner, pinned by the test below on the
+        shape ``md_parse`` actually produces.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdDocument([
+      MdParagraph([MdText("first")]),
+      MdParagraph([MdText("second")])
+    ])
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_blank_adt") == (
+            "> first\n>\n> second"
+        )
+
+    def test_blockquote_separates_its_own_children(
+        self, tmp_path: Path,
+    ) -> None:
+        """The twin of the test above, on the shape the parser builds.
+
+        ``md_parse`` wraps a quote's blocks as ``MdBlockQuote``'s direct
+        children — there is no nested ``MdDocument`` — so the separator
+        has to come from the blockquote arm itself.  It did not: two
+        quoted paragraphs rendered as two adjacent quoted lines, which
+        ``md_parse`` reads back as ONE paragraph, silently and on both
+        hosts (#1294 review).  The test above passed throughout,
+        because the arm it exercises was never the broken one.
+        """
+        src = """
+public fn main(@Unit -> @Unit)
+  requires(true) ensures(true) effects(<IO>)
+{
+  IO.print(md_render(MdDocument([MdBlockQuote([
+    MdParagraph([MdText("first")]),
+    MdParagraph([MdText("second")])
+  ])])))
+}
+"""
+        assert _parity_stdout(src, tmp_path, "md_bq_children_adt") == (
+            "> first\n>\n> second"
+        )

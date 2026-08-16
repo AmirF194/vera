@@ -1,0 +1,18 @@
+-- Conformance: two imports supplying one bare data name are refused (Chapter 8, #1304)
+-- Tests: [E156] and [E157].  Both dependencies export `Shape` and its
+-- constructor `Sq`, and this program declares neither, so each bare name names
+-- two declarations and the language defines no order between them.  Spec 8.5.4
+-- gives constructors the same rule as functions.
+import ch08_ambiguous_import_adt_lib_int;
+import ch08_ambiguous_import_adt_lib_bool;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match Sq(3) {
+    Sq(@Int) -> @Int.0,
+    Dot -> 0
+  }
+}

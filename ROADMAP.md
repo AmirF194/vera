@@ -12,7 +12,32 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-10,486 tests, 214 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+11,969 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+
+## The v0.1.13 burndown
+
+*Sixteen open bugs, driven to zero.*
+
+A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: a verifier that reports a proof it does not have is the one failure a reader cannot see.
+
+| Issue | What |
+|---|---|
+| [#1332](https://github.com/aallan/vera/issues/1332) | **Soundness.** A `@Nat` tuple component's narrowing verifies as proved at construction while the compiled program traps on that value. |
+| [#1331](https://github.com/aallan/vera/issues/1331) | A user `data` declaration named after a built-in container compiles at the container's width, so a check-green program loses its exports to an E602 refusal. |
+| [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |
+| [#1320](https://github.com/aallan/vera/issues/1320) | The checker admits literal patterns over scrutinees that can never match them — the general disease behind #1315. |
+| [#1316](https://github.com/aallan/vera/issues/1316) | A main-file `type` alias named after a prelude ADT leaks into the prelude's own bodies. |
+| [#1317](https://github.com/aallan/vera/issues/1317) | `E609` and `E610` refuse two modules' same-named declarations by declaration rather than by use. |
+| [#1312](https://github.com/aallan/vera/issues/1312) | An entry-file `data` declaration and a module's of the same name silently drop the caller when their shapes differ. |
+| [#1321](https://github.com/aallan/vera/issues/1321) | Codegen tests its container branches before `_adt_layouts`, so a user `data` named after a container is misclassified. |
+| [#1327](https://github.com/aallan/vera/issues/1327) | Monomorphization's type namer has no `IndexExpr` arm, so a generic argument that is an array index drops its caller. |
+| [#1310](https://github.com/aallan/vera/issues/1310) | A module generic instantiated at an effect-operation result type never registers its clone. |
+| [#1307](https://github.com/aallan/vera/issues/1307) | The checker resolves a bare call to a sibling function's `where` helper. |
+| [#1298](https://github.com/aallan/vera/issues/1298) | A postcondition may name a `State<T>` the function's effect row never declares. |
+| [#1322](https://github.com/aallan/vera/issues/1322) | A match binding's GC shadow-stack push is never popped, so the stack grows with recursion depth until it traps. |
+| [#1301](https://github.com/aallan/vera/issues/1301) | `md_parse` diverges between the native and browser runtimes on adversarial input. |
+| [#1328](https://github.com/aallan/vera/issues/1328) | The nightly stress workflow never exercises the host-handle reclamation battery. |
+| [#996](https://github.com/aallan/vera/issues/996) | `ch05_closure_nat_return` trapped once in a full conformance run and has not reproduced. |
 
 ## Stage 19 — The verification completeness sprint
 
@@ -137,7 +162,7 @@ Beyond the staged sprints — grouped by arc, each pulled forward by its trigger
 
 **Concurrency and WASI** — [#406](https://github.com/aallan/vera/issues/406) WASI 0.3 native async (gated on wasmtime-py exposing component async), [#853](https://github.com/aallan/vera/issues/853) extend wasi-p2 beyond IO+Random (Http via `wasi:http` outgoing-handler, streaming filesystem, sockets), [#270](https://github.com/aallan/vera/issues/270) `handle[Async]` scheduling strategies, [#227](https://github.com/aallan/vera/issues/227) timeout/cancellation effects, [#228](https://github.com/aallan/vera/issues/228) WebSocket/SSE, [#770](https://github.com/aallan/vera/issues/770) non-blocking / timed stdin, [#844](https://github.com/aallan/vera/issues/844) advisory diagnostic for shape-unfusable `async` arguments.
 
-**Modules and ecosystem** — [#187](https://github.com/aallan/vera/issues/187) module-qualified call disambiguation → [#127](https://github.com/aallan/vera/issues/127) module re-exports, [#130](https://github.com/aallan/vera/issues/130) package system and registry, [#163](https://github.com/aallan/vera/issues/163) standalone WASM runtime package, [#238](https://github.com/aallan/vera/issues/238) Component Model interop, [#56](https://github.com/aallan/vera/issues/56) incremental compilation, [#294](https://github.com/aallan/vera/issues/294) effect row variable unification, [#785](https://github.com/aallan/vera/issues/785) GitHits MCP (bookmark; trial at the next dependency-facing milestone).
+**Modules and ecosystem** — [#187](https://github.com/aallan/vera/issues/187) module-qualified call disambiguation for data types and constructors (the function namespace is settled by spec §8.5.2.2's refusal) → [#127](https://github.com/aallan/vera/issues/127) module re-exports, [#130](https://github.com/aallan/vera/issues/130) package system and registry, [#163](https://github.com/aallan/vera/issues/163) standalone WASM runtime package, [#238](https://github.com/aallan/vera/issues/238) Component Model interop, [#56](https://github.com/aallan/vera/issues/56) incremental compilation, [#294](https://github.com/aallan/vera/issues/294) effect row variable unification, [#785](https://github.com/aallan/vera/issues/785) GitHits MCP (bookmark; trial at the next dependency-facing milestone).
 
 **Standard library long tail** — [#367](https://github.com/aallan/vera/issues/367) Markdown extractors, [#368](https://github.com/aallan/vera/issues/368) HTML accessors, [#507](https://github.com/aallan/vera/issues/507) ability-dispatched array operations, [#509](https://github.com/aallan/vera/issues/509) Unicode-aware string built-ins phase 2, [#1143](https://github.com/aallan/vera/issues/1143) `<DB>` effect phases 2–3 — named columns (via Map), typed rows (via JSON), and further backends.
 

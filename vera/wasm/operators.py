@@ -1774,18 +1774,38 @@ class OperatorsMixin:
         local_idx = self.get_old_state_local(
             self._state_effect_family(expr.effect_ref))
         if local_idx is None:
-            raise CodegenInvariantError(  # pragma: no cover
+            # Reachable, and pinned: the checker accepts a contract naming a
+            # `State<T>` the function's effect row does not declare, so there
+            # is no snapshot to read.  E699 says exactly that ("the type
+            # checker should have rejected the input"), which is the honest
+            # report until it does — tracked as #1298.
+            raise CodegenInvariantError(
                 "old(State<T>) has no saved pre-execution state local", expr)
         return [f"local.get {local_idx}"]
 
     def _translate_new_expr(self, expr: ast.NewExpr) -> list[str] | None:
         """Translate new(State<T>) → call state_get to read current value."""
         state_type_arg(expr.effect_ref)  # shape validation; raises otherwise
-        # Look up the state getter import
-        if "get" not in self._effect_ops:
-            raise CodegenInvariantError(  # pragma: no cover
-                "new(State<T>) has no 'get' effect op registered", expr)
-        call_target, _is_void = self._effect_ops["get"]
+        # Keyed by the cell FAMILY, exactly as `_translate_old_expr` above
+        # keys the snapshot map — one derivation, `_state_effect_family`, on
+        # both sides of the same `ensures` clause (#1285).  This used to read
+        # the name-keyed `_effect_ops["get"]`, which holds whichever family
+        # the ROW registered first: under `effects(<State<Int>, State<Bool>>)`
+        # a `new(State<Bool>)` took `state_get_Int`, feeding an i64 into the
+        # Bool comparison's `i32.eq` — check-green, verify-green, and dead at
+        # load with wasmtime's raw type mismatch.  A bare `get(())` names no
+        # family and so is right to read the name-keyed registry; a contract
+        # names one and must not.
+        family = self._state_effect_family(expr.effect_ref)
+        call_target = self._state_getters.get(family)
+        if call_target is None:
+            # The `old()` twin above, reached the same way and pinned beside
+            # it: a contract naming a family the row does not declare has no
+            # cell to read.  Pre-#1285 this branch could not fire, because
+            # the name-keyed lookup found SOME getter and read the wrong
+            # cell — the defect, in its purest form.
+            raise CodegenInvariantError(
+                f"new(State<{family}>) has no registered state getter", expr)
         return [f"call {call_target}"]
 
     # -----------------------------------------------------------------

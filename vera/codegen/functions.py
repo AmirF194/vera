@@ -6,6 +6,7 @@ parameter allocation, body translation, and function assembly.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, cast
 
 from vera import ast
@@ -238,11 +239,17 @@ class FunctionCompilationMixin:
         module_tables: (
             tuple[SpanTypeTable | None, SpanTypeTable | None] | None
         ) = None,
+        where_scope: frozenset[str] = frozenset(),
     ) -> str | None:
         """Compile a single function to WAT.
 
         Returns the WAT function string, or None if not compilable
         (with a warning diagnostic).
+
+        *where_scope* (#1299) is the ``where``-helper names lexically in
+        scope in *decl*'s body; with the namespace this compile is running
+        under it decides which bare names the emitted body may treat as
+        denoting a user declaration.  See ``_scoped_fn_names``.
 
         *imported* is True when *decl* is an imported module body compiled into
         this flat WASM module (Pass 2.5 / 2.6).  The checker's resolved- /
@@ -310,12 +317,18 @@ class FunctionCompilationMixin:
         effect_op_result_wt: dict[str, str | None] = {}
         effect_op_result_vera: dict[str, str | None] = {}
         effect_op_cells: dict[str, CellNames] = {}
+        # #1285: cell family -> getter import, for `new(State<T>)`.
+        state_getters: dict[str, str] = {}
         # #1207: the op → Vera result-type table, from the ONE derivation
         # mono discovery also reads.  Source-order-first-wins and the
         # unnameable-argument skip live in the shared builder, so the two
-        # consultors cannot drift; the `_fn_sigs` shadow guard below is
-        # this site's own (an op the row declares but a user function
-        # already owns is not injected here, and discovery mirrors that).
+        # consultors cannot drift.  Shadowing is NOT filtered into these
+        # registries (#1284): they record which cell each op name reaches,
+        # and whether a given call site IS the op is asked at that site,
+        # through `_bare_call_denotes_op`.  Withholding the entry here
+        # answered both questions with one table and made the second answer
+        # unavailable — `State.get(())` in a function that also declares
+        # `fn get` compiled to `call $vera.get` and failed to link.
         row_op_results = (
             effect_op_result_names(decl.effect.effects)
             if isinstance(decl.effect, ast.EffectSet) else {}
@@ -355,8 +368,17 @@ class FunctionCompilationMixin:
                             base=self._family_base_te(eff.type_args[0]),
                         )
                         mangled = mangle_type_name(cell.family)
-                        # Only map if no user-defined function shadows the op
-                        if "get" not in self._fn_sigs and "get" not in effect_ops:
+                        # #1285: the family-keyed getter, recorded for EVERY
+                        # State in the row rather than only the first.  A
+                        # `new(State<T>)` in a postcondition names its family
+                        # the way `old(State<T>)` does, so it reads this
+                        # table; the name-keyed `effect_ops["get"]` beside it
+                        # stays source-order-first-wins, which is the right
+                        # rule for a bare `get(())` that names no family and
+                        # the wrong one for a contract that does.
+                        state_getters.setdefault(
+                            cell.family, f"$vera.state_get_{mangled}")
+                        if "get" not in effect_ops:
                             effect_ops["get"] = (
                                 f"$vera.state_get_{mangled}", False
                             )
@@ -376,7 +398,7 @@ class FunctionCompilationMixin:
                             effect_op_result_vera["get"] = row_op_results.get(
                                 "get")
                             effect_op_cells["get"] = cell
-                        if "put" not in self._fn_sigs and "put" not in effect_ops:
+                        if "put" not in effect_ops:
                             effect_ops["put"] = (
                                 f"$vera.state_put_{mangled}", True
                             )
@@ -384,8 +406,7 @@ class FunctionCompilationMixin:
                 elif (isinstance(eff, ast.EffectRef) and eff.name == "Exn"
                         and eff.type_args and len(eff.type_args) == 1):
                     type_name = type_expr_slot_name(eff.type_args[0])
-                    if (type_name and "throw" not in self._fn_sigs
-                            and "throw" not in effect_ops):
+                    if type_name and "throw" not in effect_ops:
                         # The tag name resolves like the State import
                         # family (matching `_check_exn_type`, #1205/#1209).
                         # IDENTITY names the tag; REPRESENTATION rides
@@ -395,9 +416,13 @@ class FunctionCompilationMixin:
                         # width: `throw(5)` into `Exn<{ @Byte | … }>` put an
                         # `i64.const` under an i32 tag and the module failed
                         # WASM validation (#1269).
+                        # The payload's TYPE EXPRESSION rides along (#1268):
+                        # the throw call site guards a refined payload by
+                        # lowering its predicate, which neither name carries.
                         exn_cell = CellNames(
                             family=self._family_name_te(eff.type_args[0]),
                             base=self._family_base_te(eff.type_args[0]),
+                            type_expr=eff.type_args[0],
                         )
                         effect_ops["throw"] = (
                             f"$exn_{mangle_type_name(exn_cell.family)}",
@@ -420,6 +445,7 @@ class FunctionCompilationMixin:
             effect_op_result_wt=effect_op_result_wt,
             effect_op_result_vera=effect_op_result_vera,
             effect_op_cells=effect_op_cells,
+            state_getters=state_getters,
             ctor_layouts=ctor_layouts,
             adt_type_names=adt_type_names,
             generic_fn_info=getattr(self, "_generic_fn_info", None),
@@ -427,6 +453,10 @@ class FunctionCompilationMixin:
                 self, "_generic_constrained_vars", None),
             ctor_to_adt=ctor_to_adt,
             known_fns=set(self._fn_sigs.keys()),
+            # #1299: the ownership predicate's table is the LEXICAL one —
+            # `known_fns` above stays flat for the guard rail, which asks
+            # whether a resolved target has a symbol, not whose name it is.
+            scoped_fns=self._scoped_fn_names(where_scope, decl.name),
             ctor_adt_tp_indices=getattr(self, "_ctor_adt_tp_indices", None),
             adt_tp_counts=getattr(self, "_adt_tp_counts", None),
             adt_tp_param_names=getattr(self, "_adt_tp_param_names", None),
@@ -489,6 +519,14 @@ class FunctionCompilationMixin:
         # return types.  One value, so the alias bodies and their parameter
         # lists cannot be handed over half-updated (#1184 / #1208).
         ctx.set_alias_env(self._alias_env)
+        # #1268: the §2.6.5 predicate lowering, bound to THIS context, for
+        # the boundaries the context discovers mid-expression (a `throw`
+        # payload).  Installed here rather than passed per call so the two
+        # halves of a guard — representation and lowering — cannot be paired
+        # with different contexts.
+        ctx.set_refinement_guard_emitter(
+            functools.partial(self._emit_boundary_refinement_guard, ctx),
+        )
         ctx.set_closure_id_start(self._next_closure_id)
         ctx.set_closure_sigs(self._closure_sigs)
         # #814 §8.5.3: module-qualified call target table, so a ``m::f`` call

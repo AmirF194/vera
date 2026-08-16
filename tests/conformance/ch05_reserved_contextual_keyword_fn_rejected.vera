@@ -1,0 +1,27 @@
+-- Conformance: a contextual keyword is not available as a function name (Chapter 5, Section 5.2)
+-- Tests: E153 — a user fn named after a grammar keyword the contextual lexer
+-- admits as a name is rejected at its declaration (#1296).  This branch of the
+-- gate is the one whose names are NOT traps: before the reservation this exact
+-- program type-checked, verified, compiled and ran, and a bare `with(1)`
+-- resolved to the declaration and returned its value.  Spec Chapter 1,
+-- Section 1.4 reserves the identifier all the same, and nothing held the MUST
+-- — the spec and the implementation disagreed about which programs are legal.
+-- The reserved set is derived from `vera/grammar.lark` rather than hand-listed,
+-- so `ability`, `effects`, `op` and `result` are covered on the same rule even
+-- though Section 1.4 never listed them.  `handle` stays legal: it is the
+-- host-invoked `vera serve` entry point (Chapter 9, Section 9.5.6).
+public fn with(@Int -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  5
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  0
+}

@@ -98,8 +98,12 @@ def make_server(
                     env_vars=env_vars,
                 )
             except WasmTrapError as trap:
-                # Contract violation / runtime trap → 500 with the
-                # trap diagnostic; the connection is always answered.
+                # Contract violation, runtime trap, or a host import
+                # that raised (#1302 routes those here too, as
+                # ``kind="host_error"``) → 500 with the diagnostic; the
+                # connection is always answered.  Before #1302 a host
+                # callback's exception escaped this handler entirely and
+                # the request went unanswered.
                 payload = json.dumps({
                     "error": str(trap),
                     "trap_kind": trap.kind,

@@ -1,0 +1,82 @@
+-- Chapter 7, Section 7.3.3 — new(State<T>) names its cell, like old(State<T>).
+-- Tests: new() and old() under a multi-State effect row, across two cells of the
+-- same machine width and two of different widths, and through a type alias.
+--
+-- A row may carry several instantiations of State, and each is an independent
+-- cell.  A bare get(()) names no family, so it means whichever cell the row binds
+-- first; new(State<T>) names one explicitly and must read that one, exactly as
+-- old(State<T>) already does.  Every value below is seeded from a caller's handler
+-- at something the other cell in the row is not holding, so a read of the wrong
+-- cell cannot coincide with the right answer.
+type Count = Nat;
+
+-- Int and Nat are both i64, so nothing about the widths distinguishes the two
+-- cells: only the family key does.  The Nat cell holds 9 and the Int cell 42.
+private fn same_width(@Unit -> @Int)
+  requires(true)
+  ensures(new(State<Nat>) == 9)
+  ensures(new(State<Int>) == 42)
+  effects(<State<Int>, State<Nat>>)
+{
+  7
+}
+
+-- Different widths: reading the Int cell for a Bool contract puts an i64 where the
+-- comparison needs an i32, so this shape cannot even load when the key is wrong.
+-- The Bool cell keeps its default and the Int cell holds 42.
+private fn cross_width(@Unit -> @Int)
+  requires(true)
+  ensures(new(State<Bool>) == false)
+  effects(<State<Int>, State<Bool>>)
+{
+  8
+}
+
+-- old() and new() of one family on the two sides of one clause: the function
+-- writes neither cell, so the claim is that the Nat cell is unchanged — which is
+-- only true if both sides read it.
+private fn unchanged(@Unit -> @Int)
+  requires(true)
+  ensures(new(State<Nat>) == old(State<Nat>))
+  effects(<State<Int>, State<Nat>>)
+{
+  6
+}
+
+-- The alias hop: State<Count> resolves to the Nat family, which is the key both
+-- the import registry and the old() snapshot map use.
+private fn through_alias(@Unit -> @Int)
+  requires(true)
+  ensures(new(State<Count>) == 9)
+  effects(<State<Int>, State<Count>>)
+{
+  5
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 42) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    handle[State<Nat>](@Nat = 9) {
+      get(@Unit) -> { resume(@Nat.0) },
+      put(@Nat) -> { resume(()) }
+    } in {
+      handle[State<Bool>](@Bool = false) {
+        get(@Unit) -> { resume(@Bool.0) },
+        put(@Bool) -> { resume(()) }
+      } in {
+        let @Int = same_width(()) * 1000 + cross_width(()) * 100 + unchanged(()) * 10 + through_alias(());
+        if @Int.0 != 7865 then {
+          1
+        } else {
+          0
+        }
+      }
+    }
+  }
+}

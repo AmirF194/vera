@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -139,6 +140,180 @@ class TestChangelogNotes:
     def test_section_requires_a_bullet(self, body: str) -> None:
         with pytest.raises(release.ReleaseError, match="at least one bullet"):
             release.changelog_notes(f"## [0.1.5]{body}", "0.1.5")
+
+    def test_section_carries_the_heading_date(self) -> None:
+        section = release.changelog_section("## [0.1.5] - 2026-07-15\n\n- One.\n", "0.1.5")
+        assert (section.version, section.date, section.notes) == (
+            "0.1.5",
+            "2026-07-15",
+            "- One.",
+        )
+
+    def test_section_without_a_date_reports_none(self) -> None:
+        assert release.changelog_section("## [0.1.5]\n\n- One.\n", "0.1.5").date is None
+
+
+def _section(bullets: str, *, version: str = "0.1.5") -> Any:
+    return release.changelog_section(
+        f"## [{version}] - 2026-07-15\n\n{bullets}\n", version
+    )
+
+
+class TestReleaseBody:
+    """#1288 — the GitHub Release body must always fit the 125,000 limit.
+
+    The v0.1.10 failure landed *after* PyPI had accepted the immutable
+    archives and after the tag was cut, so the notes builder is required to
+    be total: it either passes the section through or condenses it, and the
+    result never exceeds the limit.
+    """
+
+    def test_a_section_within_budget_passes_through_unchanged(self) -> None:
+        section = _section("### Fixed\n\n- **One.** Detail.\n- **Two.** Detail.")
+        assert release.release_body(section, repo="aallan/vera") == section.notes
+
+    def test_an_oversized_section_is_condensed_to_fit(self) -> None:
+        filler = "x" * 4000
+        bullets = "### Fixed\n\n" + "\n".join(
+            f"- **Lead-in {index}.** {filler}" for index in range(50)
+        )
+        section = _section(bullets)
+        assert len(section.notes) > release.GITHUB_RELEASE_BODY_LIMIT
+
+        body = release.release_body(section, repo="aallan/vera")
+        assert len(body) <= release.GITHUB_RELEASE_BODY_LIMIT
+        assert body != section.notes
+        assert "### Fixed" in body
+        assert "- Lead-in 0." in body
+        assert "- Lead-in 49." in body
+        assert filler not in body
+        assert (
+            "https://github.com/aallan/vera/blob/v0.1.5/CHANGELOG.md#015---2026-07-15"
+            in body
+        )
+
+    def test_the_condensed_body_states_the_measured_length_and_the_limit(self) -> None:
+        section = _section(
+            "### Fixed\n\n" + "\n".join(f"- **Lead {n}.** {'y' * 4000}" for n in range(50))
+        )
+        body = release.release_body(section, repo="aallan/vera")
+        assert f"{len(section.notes):,} characters" in body
+        assert f"{release.RELEASE_BODY_BUDGET:,}-character budget" in body
+        assert f"{release.GITHUB_RELEASE_BODY_LIMIT:,} characters" in body
+
+    def test_a_section_between_the_budget_and_the_limit_says_so_truthfully(
+        self,
+    ) -> None:
+        """The band the old wording lied in.
+
+        Condensing starts at the budget, not at GitHub's limit, so a
+        section of 120,001-125,000 characters is condensed while being
+        under the limit.  The preamble used to say it was "past GitHub's
+        125,000-character release-body limit" — a falsehood published
+        verbatim in the release body (#1330 review).
+        """
+        section = _section(
+            "### Fixed\n\n"
+            + "\n".join(f"- **Lead {n}.** {'z' * 2400}" for n in range(50))
+        )
+        size = len(section.notes)
+        assert release.RELEASE_BODY_BUDGET < size <= release.GITHUB_RELEASE_BODY_LIMIT
+
+        body = release.release_body(section, repo="aallan/vera")
+        assert body != section.notes, "the band must still condense"
+        # It is past the budget, and it is NOT past the limit.  The
+        # preamble must not claim otherwise.
+        assert f"past the {release.RELEASE_BODY_BUDGET:,}-character budget" in body
+        preamble = body.splitlines()[0]
+        assert "past GitHub" not in preamble
+        assert f"past the {release.GITHUB_RELEASE_BODY_LIMIT:,}" not in preamble
+        assert f"{size:,} characters" in preamble
+
+    def test_the_index_reproduces_the_v0110_recovery_shape(self) -> None:
+        """The lead-in carries the bullet's LAST issue/PR link, wrapped.
+
+        Pinned because the v0.1.10 manual recovery attributed a bullet whose
+        only reference sat mid-prose (``(PR [#1282](...) review)``), not
+        immediately after the bold run.
+        """
+        section = _section(
+            "### Changed\n\n"
+            "- **Lead one.** Body citing "
+            "([#1260](https://github.com/aallan/vera/issues/1260)) and then "
+            "(PR [#1282](https://github.com/aallan/vera/pull/1282) review).\n"
+            "- **Lead two.** No reference at all.\n"
+        )
+        assert release.condense_notes(section, repo="aallan/vera").splitlines()[-3:] == [
+            "### Changed",
+            "- Lead one. ([#1282](https://github.com/aallan/vera/pull/1282))",
+            "- Lead two.",
+        ]
+
+    def test_a_bullet_without_a_bold_lead_in_still_reaches_the_index(self) -> None:
+        section = _section("### Fixed\n\n- A plain bullet with no bold lead-in.")
+        assert (
+            "- A plain bullet with no bold lead-in."
+            in release.condense_notes(section, repo="aallan/vera").splitlines()
+        )
+
+    def test_condensing_a_bullet_free_section_is_an_error(self) -> None:
+        """An index that matches nothing is a failure, never a silent empty body."""
+        section = release.ChangelogSection("0.1.5", "2026-07-15", "Prose only.")
+        with pytest.raises(release.ReleaseError, match="no bullets"):
+            release.condense_notes(section, repo="aallan/vera")
+
+    def test_an_index_that_still_overflows_is_truncated_and_says_so(self) -> None:
+        bullets = "### Fixed\n\n" + "\n".join(
+            f"- **{'lead ' * 400}{index}.** detail" for index in range(400)
+        )
+        section = _section(bullets)
+        assert (
+            len(release.condense_notes(section, repo="aallan/vera"))
+            > release.GITHUB_RELEASE_BODY_LIMIT
+        )
+
+        body = release.release_body(section, repo="aallan/vera")
+        assert len(body) <= release.GITHUB_RELEASE_BODY_LIMIT
+        assert "truncated" in body
+
+    @pytest.mark.parametrize(
+        ("version", "date", "expected"),
+        [
+            ("0.1.10", "2026-08-12", "#0110---2026-08-12"),
+            ("0.1.5", None, "#015"),
+        ],
+    )
+    def test_changelog_anchor(
+        self, version: str, date: str | None, expected: str
+    ) -> None:
+        assert release.changelog_anchor(version, date) == expected
+
+    def test_every_shipped_changelog_section_yields_a_body_that_fits(self) -> None:
+        """The real artefact, not a fixture — and non-vacuously.
+
+        v0.1.10's section is the one that 422'd, so at least one section here
+        must exercise the condensing path; a suite where none did would pass
+        with the limit check deleted.
+        """
+        root = Path(__file__).parent.parent
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        # The canonical heading grammar only; the oldest sections carry a
+        # trailing PR reference the release extractor has never accepted.
+        versions = re.findall(
+            r"^## \[(\d+\.\d+\.\d+)\](?: - \d{4}-\d\d-\d\d)?[ \t]*$",
+            text,
+            re.MULTILINE,
+        )
+        assert len(versions) > 100, "CHANGELOG version headings no longer found"
+
+        condensed = []
+        for version in versions:
+            section = release.changelog_section(text, version)
+            body = release.release_body(section, repo="aallan/vera")
+            assert len(body) <= release.GITHUB_RELEASE_BODY_LIMIT, version
+            if body != section.notes:
+                condensed.append(version)
+        assert "0.1.10" in condensed
 
 
 class TestPlanning:
@@ -506,13 +681,70 @@ class TestCLI:
 
     def test_main_notes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            release, "notes_for_version", lambda version: f"- Notes for {version}."
+            release,
+            "section_for_version",
+            lambda version: release.ChangelogSection(
+                version, "2026-07-15", f"- Notes for {version}."
+            ),
         )
         output = tmp_path / "release" / "notes.md"
         assert (
             release.main(["notes", "--version", "0.1.5", "--output", str(output)]) == 0
         )
         assert output.read_text(encoding="utf-8") == "- Notes for 0.1.5.\n"
+
+    def test_main_notes_condenses_an_oversized_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        notes = "### Fixed\n\n" + "\n".join(
+            f"- **Lead {index}.** {'z' * 4000}" for index in range(50)
+        )
+        monkeypatch.setattr(
+            release,
+            "section_for_version",
+            lambda version: release.ChangelogSection(version, "2026-07-15", notes),
+        )
+        output = tmp_path / "release" / "notes.md"
+        assert (
+            release.main(
+                [
+                    "notes",
+                    "--version",
+                    "0.1.5",
+                    "--output",
+                    str(output),
+                    "--repo",
+                    "aallan/vera",
+                ]
+            )
+            == 0
+        )
+        written = output.read_text(encoding="utf-8")
+        assert len(written) <= release.GITHUB_RELEASE_BODY_LIMIT
+        assert "- Lead 49." in written
+        assert "z" * 4000 not in written
+
+    def test_the_release_workflow_passes_the_repository_to_the_notes_step(self) -> None:
+        """The fix is only real if ``release.yml`` consumes the fitted builder."""
+        workflow = (
+            Path(__file__).parent.parent / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        # The exact invocation, not a proximity window: a 400-character
+        # slice can be satisfied by a `--repo` belonging to a LATER step,
+        # and fails on a correct workflow whose `run:` block grows past
+        # it.  This gate is the only thing tying the tested builder to the
+        # shipped workflow (#1330 review).
+        invocation = (
+            'python scripts/release.py notes \\\n'
+            '            --version "$VERSION" \\\n'
+            '            --repo "$GITHUB_REPOSITORY" \\\n'
+            "            --output release/RELEASE_NOTES.md"
+        )
+        assert invocation in workflow, (
+            "release.yml no longer invokes the notes builder with --repo; "
+            "found:\n"
+            + workflow[workflow.find("release.py notes") - 40 :][:400]
+        )
 
     def test_main_manifest(self, tmp_path: Path) -> None:
         dist = _dist(tmp_path)

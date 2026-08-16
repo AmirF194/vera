@@ -698,6 +698,9 @@ ERROR_CODES: dict[str, str] = {
     "E152": "Effect redeclares a built-in effect",
     "E153": "Function name is reserved",
     "E154": "Name is reserved for the prelude",
+    "E155": "Bare function name supplied by two imports",
+    "E156": "Bare data type name supplied by two imports",
+    "E157": "Bare constructor name supplied by two imports",
     "E160": "Array index must be Int or Nat",
     "E161": "Cannot index non-array type",
     "E170": "Let binding type mismatch",
@@ -804,6 +807,7 @@ ERROR_CODES: dict[str, str] = {
     "E618": "Nested refinement base unsupported",
     "E619": "Cannot infer type argument for ability-constrained parameter",
     "E620": "Function dropped: skipped callee or no function table",
+    "E621": "Name collision: module ADT contends with a prelude data type",
     "E699": "Internal compiler error",
     # E7xx — Testing
     "E700": "Contract violation during testing",

@@ -2075,8 +2075,26 @@ The `Json` type is provided by the standard prelude — no explicit `data` decla
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `json_parse(s)` | `(String) → Result<Json, String>` | Parse a JSON string; `Err` on invalid input |
-| `json_stringify(j)` | `(Json) → String` | Serialize a Json value to a JSON string |
+| `json_parse(s)` | `(String) → Result<Json, String>` | Parse JSON text; `Err` outside the accepted domain below |
+| `json_stringify(j)` | `(Json) → String` | Serialize a Json value to its canonical JSON string |
+
+**`json_parse`'s accepted domain.** Both runtimes accept exactly RFC 8259-valid text that decodes to finite numbers and to strings that are sequences of Unicode scalar values. Text outside that domain MUST produce `Err` at the parse rather than a value, and for the two exclusions below the message MUST be the same on every runtime. The domain is defined here rather than inherited from whatever the host parser happens to accept (DESIGN.md: explicit over implicit) — the two exclusions are precisely where the host parsers disagree:
+
+- **A non-finite number, however it is written.** RFC 8259 has no literal for one, so the JavaScript constants `NaN`, `Infinity` and `-Infinity` are refused wherever a value may appear, nested or at the top level. A *syntactically valid* number whose magnitude overflows the `Float64` a `JNumber` holds is refused too, whether it is written with an exponent (`1e999`) or as plain digits (`1` followed by 309 zeros) — the distinction matters to a host whose parser decodes the two to different types, and not at all to the domain: RFC 8259 §6 sets no limit on a number's range but says an implementation may set one, and Vera's accepted range is the finite `Float64` values, which is exactly what `json_stringify` can write back. The bound is the point at which the nearest `Float64` becomes infinite, so a magnitude above the largest finite double that still *rounds* to it is accepted. Underflow is a different question and is *not* refused either: `1e-999` decodes to `0`, which is finite and in the domain. This is the input-side counterpart of the serialization rule below — a non-finite number has no JSON representation in either direction — and with both entry routes closed, the only way to reach the output-side refusal is to construct a `JNumber` from `nan()` or `infinity()`.
+- **A lone surrogate** — a `\uXXXX` escape in D800–DFFF with no matching partner. The text is grammatically legal, but its decoded value is not a sequence of scalar values, and a Vera `String` is. The alternatives are substituting U+FFFD, which silently yields a value the text did not encode, and admitting strings the rest of the language cannot represent (§0.2.6). A *matched* high-then-low pair is ordinary and is accepted: it denotes one astral scalar value.
+
+Text malformed for any other reason also produces `Err`, but that message is the host parser's own and is not pinned.
+
+**Canonical serialization.** `json_stringify` has exactly one output form, per the one-canonical-form principle (§0.2.3), and every runtime produces it byte for byte (§12.9.3):
+
+- **Separators.** `,` between elements and members, `:` between a key and its value, with no surrounding whitespace. No indentation, no trailing newline.
+- **Object members.** Emitted in the insertion order of the underlying `Map<String, Json>`, not sorted.
+- **Strings.** Escaped per RFC 8259, with non-ASCII characters emitted literally rather than as `\uXXXX` escapes.
+- **Numbers.** Rendered by ECMAScript's `Number::toString` with radix 10 ([ECMA-262 §6.1.6.1.20](https://tc39.es/ecma262/#sec-numeric-types-number-tostring)). A `JNumber` wraps a `Float64`, so this is the rendering rule that matters most: an integral value carries no fractional part (`1`, not `1.0`), the notation switches to exponential at and above `1e21` and below `1e-6`, the exponent is signed and unpadded (`1e-7`, not `1e-07`), and negative zero renders `0`.
+
+The number rule is what makes serialization non-destructive: a document containing `1` re-serializes as `1`. A form that wrote `1.0` would silently alter integral values in transit, which §0.2.2 (explicitness, no implicit behaviour) rules out.
+
+`NaN` and infinities have no JSON representation. `json_stringify` on a `JNumber` holding one **fails** rather than substituting `null` — substituting would turn a value the format cannot carry into a different, valid one that no consumer could distinguish from a genuine `JNull`. Guard with `float_is_nan` / `float_is_infinite` (§9.6.12) before serializing.
 
 **Object access:**
 
@@ -2144,7 +2162,26 @@ Decimal is an opaque built-in type implemented via host imports, following the s
 | `decimal_to_string(d)` | `(Decimal) → String` | String representation |
 | `decimal_to_float(d)` | `(Decimal) → Float64` | Potentially lossy conversion to float |
 
-**`decimal_from_string` grammar:** both runtimes accept exactly the language `[+-]? ( digits ( "." digits? )? | "." digits ) ( ("e" | "E") [+-]? digits )?` where `digits` is one or more ASCII `0`–`9`, applied after ignoring surrounding whitespace, and the exponent token (when present) must satisfy `|exp| <= 999999` — the default context's exponent floor, cited by the `decimal_round` fallback below and chosen to keep operand magnitudes bounded and the exponent-token check exact. Only finite decimals are accepted: special values (`NaN`, `sNaN`, `Infinity`), digit-group underscores (`1_000`), non-ASCII digits, and out-of-range exponent tokens are all rejected with `None`, even where a host decimal library would accept them. The accepted domain is defined by this grammar rather than inherited from whatever the host library parses (DESIGN.md: explicit over implicit) — the Python host pre-validates with this grammar before constructing a `decimal.Decimal`, and the browser runtime's parser recognises the same language, checking the exponent token as a string before any numeric conversion (an unbounded token would otherwise round silently above 2^53). This `|exp| <= 999999` bound constrains **input literals** only; exact arithmetic on accepted operands can grow the exponent past it — `decimal_mul(decimal_from_string("1e999999"), decimal_from_string("1e999999"))` yields `1E+1999998` — and such results are computed and rendered identically in both runtimes (the Python host runs the binary operations in a context whose exponent range is widened to the library maximum, `±10^18`, so a finite result never overflows and matches the browser's unbounded engine).
+**`decimal_from_string` grammar:** both runtimes accept exactly the language `[+-]? ( digits ( "." digits? )? | "." digits ) ( ("e" | "E") [+-]? digits )?` where `digits` is one or more ASCII `0`–`9`, applied after ignoring surrounding whitespace — the six code points `is_whitespace` names (`0x09`, `0x0A`, `0x0B`, `0x0C`, `0x0D`, `0x20`) and no others, stated here because the two host libraries' own trim functions disagree about the rest in both directions, and the exponent token (when present) MUST satisfy `|exp| <= 999999` — the default context's exponent floor, cited by the `decimal_round` fallback below and chosen to keep operand magnitudes bounded and the exponent-token check exact. Only finite decimals are accepted: special values (`NaN`, `sNaN`, `Infinity`), digit-group underscores (`1_000`), non-ASCII digits, and out-of-range exponent tokens are all rejected with `None`, even where a host decimal library would accept them. The accepted domain is defined by this grammar rather than inherited from whatever the host library parses (DESIGN.md: explicit over implicit) — the Python host pre-validates with this grammar before constructing a `decimal.Decimal`, and the browser runtime's parser recognises the same language, checking the exponent token as a string before any numeric conversion (an unbounded token would otherwise round silently above 2^53). This `|exp| <= 999999` bound constrains **input literals** only; exact arithmetic on accepted operands can grow the exponent past it, as squaring the largest accepted literal shows, and such results are computed and rendered identically in both runtimes (the Python host runs the binary operations in a context whose exponent range is widened to the library maximum, `±10^18`, so a finite result never overflows and matches the browser's unbounded engine).
+
+```
+-- The |exp| <= 999999 bound constrains input LITERALS.  Exact
+-- arithmetic on accepted operands can carry the exponent past it.
+public fn square_of_the_largest_literal(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match decimal_from_string("1e999999") {
+    Some(@Decimal) -> decimal_to_string(decimal_mul(@Decimal.0, @Decimal.0)),
+    None -> "unreachable: 1e999999 is inside the grammar"
+  }
+}
+```
+
+Returns `1E+1999998` on both runtimes. `decimal_from_string` yields an
+`Option<Decimal>`, so the operand is unwrapped before it reaches
+`decimal_mul`, which takes two `Decimal`\ s.
 
 **Arithmetic:**
 
@@ -2256,7 +2293,56 @@ public fn md_render(@MdBlock -> @String)
   effects(pure)
 ```
 
-Renders an `MdBlock` to a canonical Markdown string. Always succeeds. The round-trip property `md_parse(md_render(b)) == Ok(b)` should hold: rendering then re-parsing preserves structure.
+Renders an `MdBlock` to a canonical Markdown string. Always succeeds. For every block the subset can write back, the round-trip property `md_parse(md_render(b)) == Ok(b)` MUST hold: rendering then re-parsing preserves structure. Two families are outside it, both because the subset has no text for them: the two code-span shapes named below, and a container with nothing in it to write — an `MdList` with no items or an `MdTable` with no rows renders to no lines, so it re-parses to no block. (An empty `MdBlockQuote` and an empty list *item* are inside the property: each has a form, given below.) Every runtime produces the same string (§12.9.3).
+
+Four rules carry that property. The first two follow from the ADT having no line-break node (see the design note above); the last two from a container needing to be readable back as one block:
+
+- **A paragraph is one line.** Its inline content is rendered without internal newlines. A parser collapses a paragraph's soft line breaks to spaces on the way in, so nothing survives to be re-emitted.
+- **A container prefixes every line of every child.** A block quote writes `>` and a space before each rendered line, and a bare `>` for a blank one; a list item writes its marker before the first line and an equal-width indent before the rest. Prefixing only a child's first line would leave a fenced block's body — or a nested block's continuation — outside its container, and the next `md_parse` would read it as a sibling.
+- **A container separates its children.** A block quote writes a bare `>` between adjacent children, as a document writes a blank line between its own. Without it two quoted paragraphs render as two adjacent quoted lines, which re-parse as one paragraph. An empty child still occupies its line: a `MdBlockQuote` with no children renders `>`, and a list item with no blocks renders its marker followed by a space, which is what the item patterns read back — a bare `-` is a paragraph. Rendering either as nothing deletes it, and in an ordered list renumbers every item after it. A container with nothing to render at all — a list with no items, a table with no rows — contributes no lines **and** no separator, because a separator standing for an absent block is a blank line the next parse cannot attribute to anything.
+- **A code span is fenced longer than its content.** The fence is one backtick more than the longest backtick run inside the span, with a single padding space on each side when the content itself starts or ends with a backtick, or when it both starts and ends with a space — a parser strips one such pair, so the pad is what it removes instead of the content's own spaces. A fixed-width fence terminates on a run inside the content.
+
+Together these MUST make `md_render` a fixed point: re-parsing and re-rendering its output returns the same bytes. Unlike the round-trip property this one has no exceptions — a block with no text renders to no lines, which re-renders to no lines.
+
+Two code-span shapes are outside the **round-trip** property — not the fixed point, which has no exceptions. They are the two that property defers to above, and they are lost identically on every runtime rather than differently, because the subset has no escape syntax to write them another way: a span needing three or more backticks, at the start of a line, where that run is a fenced-code-block opener; and an empty span, whose rendering reads back as literal text.
+
+The rules are visible from a value a program builds, which is where they
+bite: a parser cannot produce an empty list item or a space-bounded code
+span, so only a constructed `MdBlock` reaches them.
+
+```
+-- A container prefixes every line of every child, separates adjacent
+-- children with a bare '>', and still writes a line for an empty one.
+public fn quote_rules(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  md_render(MdDocument([MdBlockQuote([MdParagraph([MdText("one")]), MdCodeBlock("sh", "a\nb")]), MdBlockQuote([])]))
+}
+```
+
+Renders `> one`, `>`, `> ```sh`, `> a`, `> b`, `> ``` `, a blank line, and
+`>` — the fenced block's body carries the prefix on every line, the bare
+`>` separates the quote's two children, and the empty quote still occupies
+its own line.
+
+```
+-- A code span is fenced longer than its content, and padded when the
+-- content would otherwise merge with the fence or lose its own spaces.
+public fn span_rules(@Unit -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  md_render(MdDocument([MdParagraph([MdCode("a`b"), MdText(" "), MdCode(" x ")]), MdList(false, [[]])]))
+}
+```
+
+Renders ``` ``a`b`` `  x  ` ``` and then `- `: the first span's fence is
+one backtick longer than the run inside it, the second is padded so the
+parser's strip removes the pad rather than the content's own spaces, and
+the empty item keeps its place as a marker and a space.
 
 **Accessor functions for contracts:**
 

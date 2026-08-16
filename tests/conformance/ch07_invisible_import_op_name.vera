@@ -1,0 +1,60 @@
+-- Conformance: a bare effect op beside an invisible same-named import
+-- (Chapter 7, #1299)
+-- Tests: spec §7.4 resolves a bare `get(())` against the CALL SITE's scope —
+-- declarations first, then the effect row.  The imported module's `get` is
+-- private, so it is in no scope here and the call is the `State<Int>`
+-- operation, whatever the flat WASM namespace happens to contain.  Codegen
+-- used to read a flat mirror of every absorbed symbol and lower this call as a
+-- call to that invisible declaration: 7007 where the cell holds 42007.
+-- The module's own `touch` is the control — its `get` IS in its scope, so it
+-- keeps reaching it.
+-- Two consumers read that scope, so the call appears in both positions.  In
+-- value position the WASM dispatch types it; as a GENERIC'S ARGUMENT
+-- instantiation discovery types it too, to name the clone — and discovery's
+-- table is program-wide, so it named `idg$Nat` from the invisible
+-- declaration's return where the cell says `idg$Int`, and the negative cell
+-- value reached a clone of the wrong signedness.
+-- 42007 + (0 - 5) + 7007 == 49009.
+import ch07_invisible_import_op_name_lib(touch);
+
+private forall<T> fn idg(@T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.0
+}
+
+public fn cell_value(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 42007)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 42007) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(())
+  }
+}
+
+public fn wrapped_cell_value(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 0 - 5)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 0 - 5) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    idg(get(()))
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 49009)
+  effects(pure)
+{
+  cell_value(()) + wrapped_cell_value(()) + touch(())
+}

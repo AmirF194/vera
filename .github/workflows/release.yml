@@ -162,6 +162,7 @@ jobs:
         run: |
           python scripts/release.py notes \
             --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
             --output release/RELEASE_NOTES.md
           python scripts/release.py manifest \
             --dist-dir dist \

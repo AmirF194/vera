@@ -1,0 +1,51 @@
+-- Conformance: a generic's `where` FAMILY resolving a bare op name
+-- (Chapter 9, #1299)
+-- Tests: `collect_generic_helper_instances`, the discovery leaf both codegen
+-- and the verifier drive directly, when a sibling helper is called with the
+-- result of a bare `get(())`.  Spec §7.4 resolves that call against the call
+-- site's scope: the imported module's `get` is private, so the call is the
+-- `State<Int>` operation and `gsib` instantiates at `Int`.
+-- Read from the invisible declaration's `@Bool` return instead, discovery
+-- names `gsib<Bool>` while the WASM rewrite names `gsib$Int` — nothing
+-- emitted matches, `ginner`'s clone is skipped [E602] and `main` is dropped
+-- from a program `check` and `verify` both pass.  Silent in the worst way:
+-- eight obligations verified against a module with no `main` in it.
+import ch09_nested_helper_family_op_name_lib(touch);
+
+private forall<T> fn outer(@T -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  ginner(@T.0)
+}
+where {
+  forall<U> fn ginner(@U -> @Int)
+    requires(true)
+    ensures(@Int.result == 7)
+    effects(pure)
+  {
+    handle[State<Int>](@Int = 42007) {
+      get(@Unit) -> { resume(@Int.0) },
+      put(@Int) -> { resume(()) }
+    } in {
+      gsib(get(()))
+    }
+  }
+
+  forall<V> fn gsib(@V -> @Int)
+    requires(true)
+    ensures(@Int.result == 7)
+    effects(pure)
+  {
+    7
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 7)
+  effects(pure)
+{
+  outer(1)
+}

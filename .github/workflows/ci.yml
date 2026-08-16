@@ -177,6 +177,9 @@ jobs:
       - name: Check no unexpected [E602]/[E604] silent skips (Layer 1 of #626)
         run: python scripts/check_e602_clean.py
 
+      - name: Check every example runs trap-free or carries a skip property
+        run: python scripts/check_examples_run.py
+
       - name: Check editor grammars and READMEs carry every built-in effect (#1156)
         run: python scripts/check_editor_grammars.py
 

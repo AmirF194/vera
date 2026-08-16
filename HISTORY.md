@@ -477,6 +477,7 @@ Stages 19 and 20 run dual-threaded: community PRs against the single-source spri
 | v0.1.9 | 4 Aug | **The declarable-trap purge** — the reserved-name family completes under E153 ([#1187](https://github.com/aallan/vera/issues/1187)). |
 | v0.1.10 | 12 Aug | **The handler-machinery consolidation** — 37 bugs fixed by giving each fact one derivation ([#1213](https://github.com/aallan/vera/issues/1213)). |
 | v0.1.11 | 13 Aug | **The community-PR queue clears** — seven third-party contributions reviewed and merged. |
+| v0.1.12 | 15 Aug | **The twelve-group burndown** — refusal rails, the JSON accept domain, throw-payload guards, branch-join monomorphization, and release and spec-drift gates. |
 
 ---
 
@@ -497,4 +498,4 @@ Ten releases, chosen for the capability each one unlocked rather than even spaci
 | Spec chapters | 7 | 10 | 12 | 13 | 13 | 13 | 13 | 14 | 14 | 14 |
 | Python coverage | — | — | 90% | 96% | 95% | 95% | 95% | 95% | 95% | 95% |
 
-Total: **2,000+ commits, 209 tagged releases, 103 active development days.**
+Total: **2,000+ commits, 210 tagged releases, 103 active development days.**

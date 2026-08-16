@@ -5,22 +5,29 @@ Checks filesystem-derivable counts (conformance programs, examples, test
 files, pre-commit hooks, CI jobs) and pytest-collection counts (total tests,
 per-file test counts and line counts) against the numbers written in
 TESTING.md, CONTRIBUTING.md, CLAUDE.md, README.md, SKILL.md, AGENTS.md,
-FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress/skipped
+FAQ.md, and ROADMAP.md.  Also checks TESTING.md's passed/stress-deselected/skipped
 breakdown against the collected total, the KNOWN_ISSUES.md "Refactoring
 needed" line counts (±10% tolerance), the HISTORY.md version-row format
 (one issue link max, no " — " separator per row), the vera/README.md
 module map (#1150) and its Test Suite paragraph's four counts, the project
 facts hardcoded on the landing page (#528), and the cited corpus-program
-count.
+count.  Three more were added for #1290: every figure on README's
+project-status line rather than only its test count; TESTING.md's dual-target
+conformance row, whose split and category counts come from a live run of the
+differential itself; and the shape of KNOWN_ISSUES.md's Bugs table.
 
 Intentionally excludes CHANGELOG.md: its counts are historical records
 (e.g. "64 programs, was 63") that are frozen snapshots of the project state
 at each release. Validating them would cause false positives on every new
 conformance addition, because the old entries are supposed to stay unchanged.
 
-Runs in a couple of seconds — fast enough for a pre-commit hook.
+Runs in a few seconds — fast enough for a pre-commit hook.  Everything it
+does is local: the one check that needs the GitHub API, the Bugs table
+against the open `bug`-labelled issues, is opt-in behind --check-bug-issues,
+for the release PR.  A commit hook must not depend on a network call.
 """
 
+import argparse
 import json
 import os
 import re
@@ -28,6 +35,8 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
+from urllib.request import Request, urlopen
 
 
 def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
@@ -79,15 +88,24 @@ def check_refactoring_counts(known_issues_text: str, root: Path) -> list[str]:
 
 _TESTS_BREAKDOWN = re.compile(
     r"\*\*Tests\*\*\s*\|\s*[\d,]+\s+across.*?;\s*([\d,]+) passed"
-    r"\s*\+\s*([\d,]+) stress,\s*([\d,]+) skipped"
+    r"\s*\+\s*([\d,]+) stress-deselected,\s*([\d,]+) skipped"
 )
 
 
 def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     """Check that TESTING.md's tests breakdown sums to the gated total.
 
+    All three parts name a pytest *disposition*, which is what makes the
+    sum readable: the 26 are deselected before the run by
+    ``addopts = "-m 'not stress'"``, so they are disjoint from the passed
+    count rather than a subset of it.  Naming the marker alone — "26
+    stress" beside "passed" and "skipped" — invited reading them as
+    stress tests that passed, which would make the sentence's arithmetic
+    wrong (PR #1329 review).
+
     The overview row states the total *and* its parts, in the shape
-    "1,306 across 40 files (…; 1,234 passed + 5 stress, 67 skipped)" —
+    "1,306 across 40 files (…; 1,234 passed + 5 stress-deselected, 67
+    skipped)" —
     illustrative numbers, so this docstring does not itself become a
     citation to keep in sync.  Pinning the total alone leaves the parts
     free to drift, so a release that moves the parts without moving the
@@ -106,7 +124,8 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
     if m is None:
         return [
             "TESTING.md: no tests breakdown matched"
-            " ('N passed + N stress, N skipped') — the row moved or was"
+            " ('N passed + N stress-deselected, N skipped') — the row"
+            " moved or was"
             " reworded, so the breakdown is no longer gated"
         ]
     parts = [int(g.replace(",", "")) for g in m.groups()]
@@ -115,7 +134,8 @@ def check_tests_breakdown(testing_text: str, live_total: int) -> list[str]:
         passed, stress, skipped = parts
         return [
             f"TESTING.md tests breakdown: {passed:,} passed"
-            f" + {stress:,} stress + {skipped:,} skipped = {total:,},"
+            f" + {stress:,} stress-deselected + {skipped:,} skipped"
+            f" = {total:,},"
             f" but the collected total is {live_total:,}"
         ]
     return []
@@ -825,7 +845,382 @@ def check_module_map(readme_text: str, root: Path) -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# README's project-status line
+#
+# One sentence carries six live figures and the oracle read one of them.  The
+# `check_readme` closure it used returned silently when a pattern matched
+# nothing, and four of its five patterns matched nothing at all — so the
+# conformance count beside the gated tests count drifted through two rebases
+# unseen.  Every figure on the line is gated here, and a figure that has gone
+# missing is an error rather than a skip.
+# ---------------------------------------------------------------------------
+
+_STATUS_LINE = re.compile(r"^.*?\btests, \d+% Python code coverage.*$", re.M)
+_STATUS_FIGURES = (
+    (r"([\d,]+) tests,", "tests"),
+    (r"([\d,]+) conformance programs", "conformance programs"),
+    (r"([\d,]+) examples", "examples"),
+    (r"(\d+)-chapter specification", "spec chapters"),
+)
+
+
+def check_project_status(
+    readme_text: str,
+    live_tests: int,
+    live_conformance: int,
+    live_examples: int,
+    live_chapters: int,
+) -> list[str]:
+    """Check every count on README.md's project-status line."""
+    line = _STATUS_LINE.search(readme_text)
+    if line is None:
+        return [
+            "README.md: could not find the project-status line "
+            "(`… tests, N% Python code coverage …`)"
+        ]
+    expected = (live_tests, live_conformance, live_examples, live_chapters)
+    errors: list[str] = []
+    for (pattern, label), live in zip(_STATUS_FIGURES, expected, strict=True):
+        found = re.search(pattern, line.group(0))
+        if found is None:
+            errors.append(
+                f"README.md project-status line: could not find the {label} count"
+            )
+            continue
+        cited = int(found.group(1).replace(",", ""))
+        if cited != live:
+            errors.append(
+                f"README.md project-status {label}: doc says {cited}, live is {live}"
+            )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# TESTING.md's dual-target conformance row
+#
+# The row states a run-level total, a tested/skipped split and three category
+# counts.  The total has an oracle in the conformance manifest; the rest had
+# none, and the row explicitly claims the excluded set is "defined by those
+# three properties rather than by a filename list, so it stays accurate as
+# programs are added" — a claim that only holds if something measures it.  The
+# split comes from a live `-rs` run of the differential, about three seconds.
+# ---------------------------------------------------------------------------
+
+
+class DualTargetSplit(NamedTuple):
+    """What a live run of the dual-target differential actually did."""
+
+    tested: int
+    skipped: int
+    families: int
+    no_main: int
+    nondeterministic: int
+
+
+_DUAL_TARGET_TEST = "tests/test_wasi_target.py::TestDualTargetConformance"
+_SKIP_REASONS = (
+    ("families", "host famil"),
+    ("no_main", "zero-argument"),
+    ("nondeterministic", "nondeterministic ops"),
+)
+_SKIP_LINE = re.compile(r"^SKIPPED \[(\d+)\] (.*)$", re.M)
+# pytest omits a category with a zero count, so "174 passed in 3.1s" and
+# "52 skipped in 3.1s" are both well-formed summaries.  A pattern
+# requiring both made either one unreadable, and an unreadable report is
+# a gate failure — a false one (#1329 review).
+_PYTEST_TOTALS = re.compile(r"(\d+) (passed|skipped)\b")
+_PYTEST_SUMMARY = re.compile(r"\d+ (?:passed|skipped)\b[^\n]*\bin [\d.]+s")
+_DUAL_TARGET_FIGURES = (
+    ("tested", r"(\d+) are dual-tested"),
+    ("skipped", r"and (\d+) skip"),
+    ("families", r"(\d+) whose compiled WAT"),
+    ("no_main", r"(\d+) with no public zero-argument"),
+    ("nondeterministic", r"and (\d+) calling a nondeterministic op"),
+)
+
+
+def parse_dual_target_report(report: str) -> DualTargetSplit | None:
+    """Read a split out of pytest's ``-rs`` output, or ``None``.
+
+    ``None`` means the run cannot be read — no summary line, or a skip whose
+    reason matches none of the three documented properties.  A new skip reason
+    is exactly the case the row's "stays accurate as programs are added" claim
+    needs to hear about, so it must not be silently folded into a category.
+    """
+    summary = _PYTEST_SUMMARY.search(report)
+    if summary is None:
+        return None
+    totals = {kind: int(n) for n, kind in _PYTEST_TOTALS.findall(summary.group(0))}
+    counts = dict.fromkeys((name for name, _ in _SKIP_REASONS), 0)
+    for raw, reason in _SKIP_LINE.findall(report):
+        for name, marker in _SKIP_REASONS:
+            if marker in reason:
+                counts[name] += int(raw)
+                break
+        else:
+            return None
+    skipped = totals.get("skipped", 0)
+    if sum(counts.values()) != skipped:
+        return None
+    return DualTargetSplit(totals.get("passed", 0), skipped, **counts)
+
+
+def dual_target_split(root: Path) -> DualTargetSplit | None:
+    """Run the dual-target differential and report what it did."""
+    pytest_bin = root / ".venv/bin/pytest"
+    if not pytest_bin.exists():
+        pytest_bin = Path("pytest")
+    try:
+        result = subprocess.run(
+            [str(pytest_bin), _DUAL_TARGET_TEST, "-q", "-rs", "-p", "no:randomly"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(root),
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Every other check here turns a failure into a string in `errors`
+        # and lets `main` print the whole list.  Letting this one raise
+        # would end the run on a traceback and the other twenty checks
+        # would never report — and this call is on the default path, so
+        # the pre-commit hook takes it every time (#1329 review).
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_dual_target_report(result.stdout)
+
+
+def check_dual_target_row(
+    testing_text: str, run_level_total: int, split: DualTargetSplit
+) -> list[str]:
+    """Check TESTING.md's dual-target row against the manifest and a run."""
+    errors: list[str] = []
+    cited_total = re.search(r"all ([\d,]+) run-level", testing_text)
+    if cited_total is None:
+        errors.append(
+            "TESTING.md: could not find the dual-target run-level total "
+            "(`all N run-level conformance programs`)"
+        )
+    elif int(cited_total.group(1).replace(",", "")) != run_level_total:
+        errors.append(
+            f"TESTING.md dual-target run-level total: doc says "
+            f"{cited_total.group(1)}, manifest has {run_level_total}"
+        )
+
+    cited: dict[str, int] = {}
+    for name, pattern in _DUAL_TARGET_FIGURES:
+        found = re.search(pattern, testing_text)
+        if found is None:
+            errors.append(
+                f"TESTING.md dual-target row: could not find the {name} count"
+            )
+            continue
+        cited[name] = int(found.group(1))
+        if cited[name] != getattr(split, name):
+            errors.append(
+                f"TESTING.md dual-target {name}: doc says {cited[name]}, "
+                f"a live run has {getattr(split, name)}"
+            )
+    if len(cited) == len(_DUAL_TARGET_FIGURES):
+        if cited["tested"] + cited["skipped"] != run_level_total:
+            errors.append(
+                f"TESTING.md dual-target row does not add up: "
+                f"{cited['tested']} + {cited['skipped']} is not {run_level_total}"
+            )
+        categories = cited["families"] + cited["no_main"] + cited["nondeterministic"]
+        if categories != cited["skipped"]:
+            errors.append(
+                f"TESTING.md dual-target skip categories do not add up: "
+                f"{categories} is not {cited['skipped']}"
+            )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# KNOWN_ISSUES' Bugs table against the tracker
+#
+# The convention is one row per open `bug`-labelled issue.  Two halves, and
+# they are separated on purpose: the structural half is pure text and runs
+# always, while the parity half needs the GitHub API and a pre-commit hook must
+# not depend on a network call — it is opt-in via `--check-bug-issues`, for the
+# release PR, where the tracker and the file are meant to agree.  Mid-burndown
+# they legitimately do not: a bug filed on an open PR's branch has an issue
+# before it has a row.
+# ---------------------------------------------------------------------------
+
+_BUGS_SECTION = re.compile(r"^## Bugs[ \t]*$(.*?)(?=^## |\Z)", re.M | re.S)
+_ISSUE_LINK = re.compile(r"\[#(\d+)\]\(https://github\.com/[\w.-]+/[\w.-]+/issues/(\d+)\)")
+_NO_BUGS = "No known bugs."
+
+
+def bug_rows(known_issues_text: str) -> list[int] | None:
+    """Issue numbers from the Bugs table's Issue column, in order.
+
+    The Issue column is a row's canonical tracker, and it is the only place
+    read: rows cross-link other issues in their prose, and counting those
+    would make one bug's context read as another bug's row.
+
+    ``[]`` is the documented empty state — the section body is exactly "No
+    known bugs." — and ``None`` means the section could not be read at all.
+    The two are different problems and a caller must not conflate them.
+    """
+    section = _BUGS_SECTION.search(known_issues_text)
+    if section is None:
+        return None
+    body = section.group(1).strip()
+    if body == _NO_BUGS:
+        return []
+    numbers: list[int] = []
+    for line in body.splitlines():
+        if not line.startswith("|") or set(line) <= set("|- "):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells[-1] == "Issue":
+            continue
+        # The last cell, so prose carrying a `|` cannot shift the column.
+        links = [
+            int(number)
+            for number, url_number in _ISSUE_LINK.findall(cells[-1])
+            if number == url_number
+        ]
+        if len(links) != 1:
+            return None
+        numbers.append(links[0])
+    return numbers or None
+
+
+def check_bug_rows(known_issues_text: str) -> list[str]:
+    """Check the Bugs table's shape: one well-formed, unique issue per row."""
+    numbers = bug_rows(known_issues_text)
+    if numbers is None:
+        return [
+            "KNOWN_ISSUES.md: the `## Bugs` table was not found, or a row's "
+            "Issue column does not hold exactly one `[#N](…/issues/N)` link. "
+            "An empty section is written `No known bugs.`"
+        ]
+    duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+    return [
+        f"KNOWN_ISSUES.md: issue #{number} has a Bugs row twice"
+        for number in duplicates
+    ]
+
+
+def check_bug_issue_parity(rows: list[int], open_bugs: list[int]) -> list[str]:
+    """Check the Bugs table against the open `bug`-labelled issues."""
+    if not open_bugs:
+        return [
+            "KNOWN_ISSUES.md: an open `bug`-labelled issue was not found at "
+            "all, so the Bugs table has nothing to be checked against. An "
+            "empty query is a failed one, not a clean bill of health."
+        ]
+    errors = [
+        f"KNOWN_ISSUES.md: issue #{number} is an open bug with no Bugs row"
+        for number in sorted(set(open_bugs) - set(rows))
+    ]
+    errors += [
+        f"KNOWN_ISSUES.md: the Bugs row for #{number} is not an open bug issue"
+        for number in sorted(set(rows) - set(open_bugs))
+    ]
+    return errors
+
+
+class BugQueryError(RuntimeError):
+    """The tracker could not be queried — a failed run, not an empty one."""
+
+
+def open_bug_issues(repo: str = "aallan/vera") -> list[int]:
+    """Open issue numbers carrying the `bug` label, from the GitHub API.
+
+    Raises `BugQueryError` rather than returning `[]` on a transport or
+    payload failure.  `check_bug_issue_parity` reads an empty list as
+    "the query failed", so returning one here would reach the right
+    verdict for the wrong reason — and the caller could no longer tell a
+    burned-down tracker from an unreachable one (#1329 review).
+    """
+    numbers: list[int] = []
+    for page in range(1, 11):
+        url = (
+            f"https://api.github.com/repos/{repo}/issues"
+            f"?labels=bug&state=open&per_page=100&page={page}"
+        )
+        request = Request(url, headers={"User-Agent": "vera-doc-counts/1"})
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        try:
+            # The URL is built from a caller-supplied repository, not input.
+            with urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+        except (OSError, ValueError) as exc:
+            # URLError and HTTPError are OSError; a socket timeout is too,
+            # and a malformed body raises JSONDecodeError, a ValueError.
+            raise BugQueryError(f"could not query {repo} for open bugs: {exc}") from exc
+        if not payload:
+            break
+        numbers += [
+            item["number"] for item in payload if "pull_request" not in item
+        ]
+    return numbers
+
+
+_ERROR_CODES_CITATION = re.compile(
+    r"maps every code to a short description \((\d+) entries — (\d+) `E` codes "
+    r"and the two `W` warning codes\)"
+)
+
+
+def check_error_codes_count(readme_text: str, registry: dict[str, object]) -> list[str]:
+    """Check vera/README.md's `ERROR_CODES` figures against the registry.
+
+    Three numbers in one sentence, and none was gated: the total, the `E`
+    count, and the claim that the remainder is exactly the two `W` codes.
+    The registry is the only source for any of them, so the sentence could
+    drift on every code added (#1330 review).
+    """
+    found = _ERROR_CODES_CITATION.search(readme_text)
+    if found is None:
+        return [
+            "vera/README.md: could not find the ERROR_CODES count sentence "
+            "('maps every code to a short description (N entries — N `E` "
+            "codes and the two `W` warning codes)')"
+        ]
+    cited_total, cited_e = (int(g) for g in found.groups())
+    live_e = sum(1 for code in registry if code.startswith("E"))
+    live_w = sum(1 for code in registry if code.startswith("W"))
+    errors: list[str] = []
+    if cited_total != len(registry):
+        errors.append(
+            f"vera/README.md ERROR_CODES total: doc says {cited_total}, "
+            f"live is {len(registry)}"
+        )
+    if cited_e != live_e:
+        errors.append(
+            f"vera/README.md ERROR_CODES E-code count: doc says {cited_e}, "
+            f"live is {live_e}"
+        )
+    if live_w != 2:
+        errors.append(
+            f"vera/README.md says the remainder is two `W` codes; the "
+            f"registry has {live_w}"
+        )
+    return errors
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check-bug-issues",
+        action="store_true",
+        help=(
+            "also check KNOWN_ISSUES.md's Bugs table against the open "
+            "`bug`-labelled issues (needs the GitHub API; for the release PR, "
+            "not for pre-commit)"
+        ),
+    )
+    args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     errors: list[str] = []
 
@@ -1155,40 +1550,18 @@ def main() -> int:
 
     readme_md = (root / "README.md").read_text(encoding="utf-8")
 
-    def check_readme(pattern: str, expected: int, label: str) -> None:
-        m = re.search(pattern, readme_md)
-        if not m:
-            return  # Pattern absent from README is OK — not all counts appear
-        doc_val = int(m.group(1).replace(",", ""))
-        if doc_val != expected:
-            errors.append(
-                f"README.md {label}: doc says {doc_val}, live is {expected}"
-            )
-
-    check_readme(
-        r"([\d,]+) tests across",
-        live_total_tests,
-        "total tests",
-    )
-    check_readme(
-        r"([\d,]+) tests, \d+% Python code coverage",
-        live_total_tests,
-        "project-status tests",
-    )
-    check_readme(
-        r"tests across (\d+) files",
-        live_test_files,
-        "test file count",
-    )
-    check_readme(
-        r"(\d+) programs across \d+ spec",
-        live_conformance,
-        "conformance programs",
-    )
-    check_readme(
-        r"(\d+) end-to-end",
-        live_examples,
-        "example count",
+    # One sentence carries six live figures.  Its four countable ones are
+    # gated together, each an error when it goes missing: the four patterns
+    # that used to sit here beside the tests one matched no README text at
+    # all, and returned silently rather than saying so.
+    errors.extend(
+        check_project_status(
+            readme_md,
+            live_total_tests,
+            live_conformance,
+            live_examples,
+            len(list((root / "spec").glob("*.md"))),
+        )
     )
 
     # ------------------------------------------------------------------
@@ -1446,8 +1819,41 @@ def main() -> int:
     # 19. Check the cited corpus-program count (#1160 review)
     # ------------------------------------------------------------------
 
+    from vera.errors import ERROR_CODES
+
+    errors.extend(check_error_codes_count(vera_readme_md, ERROR_CODES))
     errors.extend(check_corpus_count(root))
     errors.extend(check_conformance_skip_total(root))
+
+    # ------------------------------------------------------------------
+    # 20. Check TESTING.md's dual-target row against a live run
+    # ------------------------------------------------------------------
+
+    split = dual_target_split(root)
+    if split is None:
+        errors.append(
+            f"TESTING.md: the dual-target differential ({_DUAL_TARGET_TEST}) "
+            f"could not be read — it failed, or it skipped for a reason the "
+            f"row's three documented properties do not cover"
+        )
+    else:
+        errors.extend(
+            check_dual_target_row(testing_md, level_counts.get("run", 0), split)
+        )
+
+    # ------------------------------------------------------------------
+    # 21. Check KNOWN_ISSUES.md's Bugs table
+    # ------------------------------------------------------------------
+
+    known_issues = (root / "KNOWN_ISSUES.md").read_text(encoding="utf-8")
+    errors.extend(check_bug_rows(known_issues))
+    if args.check_bug_issues:
+        rows = bug_rows(known_issues)
+        if rows is not None:
+            try:
+                errors.extend(check_bug_issue_parity(rows, open_bug_issues()))
+            except BugQueryError as exc:
+                errors.append(f"KNOWN_ISSUES.md: {exc}")
 
     # ------------------------------------------------------------------
     # Report

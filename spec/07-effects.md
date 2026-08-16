@@ -82,6 +82,8 @@ effects(<State<Int>, State<String>>)
 
 This means the function uses two independent state cells: one `Int` and one `String`.
 
+The cells being independent, a form that names one names it by its type argument: `old(State<Int>)` and `new(State<Int>)` (§7.9.2) both read the `Int` cell whatever else the row declares, and their `State<String>` counterparts the `String` one. Only a *bare* operation call, which names no type argument, falls back on the written order of the row (§7.3.2).
+
 The same effect with the same type parameters MUST NOT appear twice (it would be redundant).
 
 ## 7.4 Performing Effects
@@ -111,6 +113,8 @@ public fn hello(-> @Unit)
 ```
 
 Effect operations are resolved by the effect declared in the function's effect row. If `get` appears in a function with `effects(<State<Int>>)`, it refers to the `get` operation of `State<Int>`.
+
+**Declarations first.** A bare name is resolved as an operation only when no *function declaration* of that name is in scope. A program declaring `fn get` owns every bare `get(...)` in that declaration's scope — including inside a `handle[State<T>]` body, which is not an exception — and the resolution order below never runs for it. Operation names are not reserved, so this is the ordinary shadowing rule rather than a special case, and it is a property of the call site's scope alone. The qualified spelling is unaffected: `State.get(())` names the effect, so no declaration can shadow it, and it is how a program that declares `fn get` still reaches the cell.
 
 **Resolution order.** More than one effect in scope may declare the same operation name — the built-in `State` and `Http` both declare `get`. A bare operation name binds to the **first** effect that declares it in this order: the innermost enclosing `handle[E]` (§7.5), then each enclosing handler outwards, then the function's declared effect row **in the order the row is written**, and finally the **registered** effects in registration order — the built-ins first, then any user `effect` declaration in source order. So `effects(<State<Int>, Http>)` binds a bare `get` to `State`, `effects(<Http, State<Int>>)` binds it to `Http`, and a `handle[State<Int>]` around the call binds it to `State` whatever the row says. Every step of that list is an ordered sequence, so the binding is a property of the program text alone — never of the order an implementation happens to enumerate the row's members.
 

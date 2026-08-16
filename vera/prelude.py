@@ -16,9 +16,13 @@ defined declarations with the same name shadow the prelude versions:
 
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from vera import ast
+from vera.monomorphize import canonicalize_type_aliases
 
 
 # #851 — synthetic origin filename for prelude-injected declarations.
@@ -59,6 +63,12 @@ data Json { JNull, JBool(Bool), JNumber(Float64), JString(String), JArray(Array<
 _HTML_DATA = """\
 data HtmlNode { HtmlElement(String, Map<String, String>, Array<HtmlNode>), HtmlText(String), HtmlComment(String) }
 """
+
+# Every source block above that declares an ADT.  Read only by
+# :func:`prelude_adt_names`; a new prelude ADT block belongs here.
+_PRELUDE_DATA_SOURCES = (
+    _PRELUDE_DATA, _HTTP_SERVER_DATA, _JSON_DATA, _HTML_DATA,
+)
 
 _HTML_COMBINATORS = """\
 private fn html_attr(@HtmlNode, @String -> @Option<String>)
@@ -771,6 +781,149 @@ def _parse_source(source: str) -> ast.Program:
 # =====================================================================
 # Public API
 # =====================================================================
+
+@functools.lru_cache(maxsize=1)
+def prelude_data_decls() -> Mapping[str, ast.DataDecl]:
+    """The prelude's own ``data`` declarations, by name (#1277).
+
+    Derived by PARSING the same source blocks :func:`inject_prelude`
+    concatenates, with the same parser, so a new prelude ADT joins by
+    being written — no second list to keep in step, and no regex
+    approximating the grammar.  Cached: the blocks are constants.
+
+    Two consumers, one derivation: :func:`prelude_adt_names` (codegen's
+    ADT-membership floor) and codegen's Pass-1.2 contention rail, which
+    compares a module's declaration of one of these names against the
+    prelude's own with :func:`data_decl_shape`.
+
+    READ-ONLY, because the cache hands every caller the same object: a
+    plain dict would let one consumer's mutation reach the other and
+    every later compile in the process, and the AST nodes inside it are
+    the ones the rail compares against.  The proxy makes the shared
+    identity safe rather than merely undocumented.
+    """
+    parsed = _parse_source("\n".join(_PRELUDE_DATA_SOURCES))
+    return MappingProxyType({
+        tld.decl.name: tld.decl
+        for tld in parsed.declarations
+        if isinstance(tld.decl, ast.DataDecl)
+    })
+
+
+@functools.lru_cache(maxsize=1)
+def prelude_adt_names() -> frozenset[str]:
+    """Every ADT name the prelude can provide (#1277).
+
+    The checker registers all of them in every ``TypeEnv``
+    unconditionally (:mod:`vera.environment`), so they are data types in
+    every namespace whatever a program declares — and codegen's
+    per-namespace ADT membership (#1253) has to say the same, or the two
+    sides disagree about what a NAME MEANS.  Its Pass-0.5 built-in
+    snapshot covers only ``_register_builtin_adts``, which is taken
+    before Pass 1.2 injects ``Json``, ``HtmlNode``, ``Request`` and
+    ``Response``; this set is the floor that completes it.
+
+    Unconditional, deliberately: whether a given program DEMANDS a block
+    is `inject_prelude`'s question, and membership must not condition on
+    it where the checker does not.  Whether the name is CONTENDED is a
+    third question, asked by codegen's Pass-1.2 rail on the declarations
+    themselves — see ``_adt_members_in_scope`` for why naming an
+    undemanded ADT here is inert (a property of today's consumer, not of
+    the set) and why the contended case is refused rather than resolved.
+    Cached like :func:`prelude_data_decls` beneath it, and for the same
+    reason: the blocks are constants, so the answer is too.  Its consumer
+    is ``_adt_members_in_scope``, which runs once per namespace, and
+    rebuilding an identical frozenset per namespace bought nothing.
+    """
+    return frozenset(prelude_data_decls())
+
+
+def data_decl_shape(
+    decl: ast.DataDecl,
+    aliases: Mapping[str, ast.TypeExpr] | None = None,
+    alias_params: Mapping[str, tuple[str, ...]] | None = None,
+) -> tuple[object, ...]:
+    """*decl*'s LAYOUT identity — what two declarations must share (#1277).
+
+    Two ``data`` declarations of one name can occupy codegen's single
+    flat layout slot only if they describe the same layout, which is
+    the type-parameter arity plus each constructor's name, tag position
+    and field types.  Type parameters are normalised POSITIONALLY, so
+    ``data Option<A> { None, Some(A) }`` is the prelude's ``Option`` and
+    not a contention: a renamed parameter changes no layout.
+
+    Constructor ORDER is significant, because the tag is the position —
+    which is why this is a stronger test than the set comparison
+    :func:`_has_standard_json` and its siblings make when deciding
+    whether the prelude's combinators can be injected over a user's
+    declaration.  Those answer "will the match arms type-check?"; this
+    answers "can one registered layout serve both?".
+
+    A field type this does not model reduces to its node class, which
+    can only ever make two declarations compare DIFFERENT — the prelude's
+    own fields are all named types, so the coarse arm is never on both
+    sides of a comparison.  Different is the safe direction: it refuses
+    a compile rather than sharing a layout that may not fit.
+
+    *aliases* / *alias_params* canonicalize the field types first, and
+    belong to the namespace THIS declaration was written in — a module's
+    own alias maps for a module's declaration (§8.4.1 makes an alias
+    module-local, so no other namespace's may answer here; #1111/#1253).
+    Passing them for one side only is deliberate: a module that spells a
+    restatement through its own alias (`type Payload = String;`) means
+    the prelude's type and must not be refused, while resolving the
+    PRELUDE's spelling through a module's aliases would let a module
+    alias named after something the prelude spells — `type Array<T> =
+    Int;` against the prelude's `JArray(Array<Json>)` — collapse two
+    incompatible layouts into one key.  The prelude's declaration
+    resolves through nothing, because the prelude is its own namespace.
+
+    A type PARAMETER shadows an alias of the same name (`_resolve_named`'s
+    branch order), so the declaration's own parameters are withheld from
+    the map before substitution.
+    """
+    slots = {
+        name: f"#{i}" for i, name in enumerate(decl.type_params or ())
+    }
+    if aliases:
+        visible = {k: v for k, v in aliases.items() if k not in slots}
+        params = {
+            k: v for k, v in (alias_params or {}).items() if k not in slots
+        }
+        def key(te: ast.TypeExpr) -> str:
+            return _type_shape_key(
+                canonicalize_type_aliases(te, dict(visible), dict(params)),
+                slots,
+            )
+    else:
+        def key(te: ast.TypeExpr) -> str:
+            return _type_shape_key(te, slots)
+    return (
+        len(decl.type_params or ()),
+        tuple(
+            (ctor.name, tuple(key(field) for field in (ctor.fields or ())))
+            for ctor in decl.constructors
+        ),
+    )
+
+
+def _type_shape_key(te: object, slots: dict[str, str]) -> str:
+    """A deterministic key for a field type — see :func:`data_decl_shape`."""
+    if isinstance(te, ast.NamedType):
+        base = slots.get(te.name, te.name)
+        args = te.type_args or ()
+        if not args:
+            return base
+        inner = ",".join(_type_shape_key(a, slots) for a in args)
+        return f"{base}<{inner}>"
+    if isinstance(te, ast.FnType):
+        params = ",".join(_type_shape_key(p, slots) for p in te.params)
+        return f"fn({params})->{_type_shape_key(te.return_type, slots)}"
+    if isinstance(te, ast.RefinementType):
+        base = _type_shape_key(te.base_type, slots)
+        return f"{{{base}|{ast.format_expr(te.predicate)}}}"
+    return f"?{type(te).__name__}"
+
 
 def inject_prelude(program: ast.Program) -> str:
     """Inject prelude ADTs, combinators, and array operations.

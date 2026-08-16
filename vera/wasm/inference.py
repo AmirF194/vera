@@ -13,7 +13,11 @@ from vera.monomorphize import (
     resolve_fn_type_alias,
     substitute_type_vars,
 )
-from vera.slots import family_fallback_name, type_expr_slot_name
+from vera.slots import (
+    bare_call_denotes_user_fn,
+    family_fallback_name,
+    type_expr_slot_name,
+)
 from vera.wasm.helpers import _element_wasm_type, state_type_arg
 
 # `substitute_type_vars` was relocated to `vera.monomorphize` (the codegen-free
@@ -526,11 +530,13 @@ class InferenceMixin:
         # a fn declaring `<State<T>>`) is an `ast.FnCall`, not a
         # `QualifiedCall`.  Its result WAT type is the op's registered
         # result type — needed when the call sits directly in a
-        # constructor-argument (A1) or match-scrutinee (A2) position.  The
-        # `_effect_ops` guard in codegen/functions.py only registers ops a
-        # user fn does NOT shadow, so a same-named user fn still reaches the
-        # `_fn_ret_types` lookup below.
-        if expr.name in self._effect_ops:
+        # constructor-argument (A1) or match-scrutinee (A2) position.
+        # #1284: the registry is complete (it says which cell an op name
+        # reaches, shadowed or not), so whether THIS site is the op is the
+        # ownership predicate's question — a same-named user fn falls
+        # through to the `_fn_ret_types` lookup below, the same answer the
+        # dispatch in `_translate_call` will emit a call for.
+        if self._bare_call_denotes_op(expr.name) and expr.name in self._effect_ops:
             _target, is_void = self._effect_ops[expr.name]
             if expr.name == "throw" or is_void:
                 return None
@@ -960,9 +966,12 @@ class InferenceMixin:
         #                       else from `_infer_fncall_vera_type`
         #   ArrayLit          → "Array"
         #   IndexExpr         → element type
-        #   IfExpr            → from then-branch
+        #   IfExpr            → from the first branch that yields a name
+        #                       (#1286 — the Vera-level twin of #1276's
+        #                       WAT join; a diverging `then` names nothing)
         #   Block             → from trailing expr (defensive add #597)
-        #   MatchExpr         → from first arm body (defensive add #597)
+        #   MatchExpr         → from the first arm body that yields a name
+        #                       (defensive add #597; #1286 join)
         #   HandleExpr        → from body (defensive add #597)
         #   AssertExpr        → "Unit" (defensive add #597)
         #   AssumeExpr        → "Unit" (defensive add #597)
@@ -1030,13 +1039,15 @@ class InferenceMixin:
             # #1006: an effect op in a Vera-type-needing position (the
             # array-literal ELEMENT case) — the op is not in the fn tables,
             # so consult the op registry first.  Guarded on `_effect_ops`
-            # membership: op names only bind where ops are injected, and a
-            # user fn shadowing an op name is kept OUT of `_effect_ops` (the
-            # `_fn_sigs` guard at both injection sites), so a shadowed name
-            # still resolves through the normal fn path below.  `get` maps
-            # to State<T>'s T; `put`/`throw` record no Vera result type and
-            # return None (unchanged skip for value-position uses).
-            if expr.name in self._effect_ops:
+            # membership (op names only bind where ops are injected) AND on
+            # bare-call ownership (#1284), so a user fn shadowing an op name
+            # resolves through the normal fn path below — the registry
+            # itself no longer withholds the name, because it answers which
+            # cell the op reaches rather than whose name this is.  `get`
+            # maps to State<T>'s T; `put`/`throw` record no Vera result type
+            # and return None (unchanged skip for value-position uses).
+            if (self._bare_call_denotes_op(expr.name)
+                    and expr.name in self._effect_ops):
                 return self._effect_op_result_vera.get(expr.name)
             return self._infer_fncall_vera_type(expr)
         if isinstance(expr, ast.StringLit):
@@ -1049,9 +1060,22 @@ class InferenceMixin:
             elem = self._infer_index_element_type(expr)
             return elem
         if isinstance(expr, ast.IfExpr):
-            if expr.then_branch.expr is not None:
-                return self._infer_vera_type(expr.then_branch.expr)
-            return None  # pragma: no cover
+            # #1286: the FIRST branch that yields a name, not the `then`
+            # branch alone — the Vera-level twin of the #1276 WAT join
+            # (`_infer_expr_wasm_type` / `_infer_block_result_type`).  A
+            # `then` whose every path throws names no type, and answering
+            # `None` for the whole `if` on that basis lost the type the
+            # completing branch carries: as an array-literal element the
+            # literal was dropped with the loud [E602] skip, and as a
+            # generic argument the instantiation fell to the phantom-var
+            # default (`idg$Bool` for an `Int` argument) and the module
+            # failed to load — both from check- and verify-green source.
+            # Branches that DO complete must agree on their type (the
+            # checker enforces that), so the first answer is the answer.
+            then_vt = self._infer_vera_type(expr.then_branch.expr)
+            if then_vt is not None:
+                return then_vt
+            return self._infer_vera_type(expr.else_branch.expr)
         # Defensive adds (#597) — these compound expressions could
         # flow in here from generic-arg inference paths, but today
         # most callers preprocess first.  Returning the right Vera
@@ -1061,8 +1085,12 @@ class InferenceMixin:
         if isinstance(expr, ast.Block):
             return self._infer_vera_type(expr.expr)
         if isinstance(expr, ast.MatchExpr):
-            if expr.arms:
-                return self._infer_vera_type(expr.arms[0].body)
+            # #1286: the first arm that yields a name — see the `IfExpr`
+            # arm above, same shape and same two symptoms.
+            for arm in expr.arms:
+                arm_vt = self._infer_vera_type(arm.body)
+                if arm_vt is not None:
+                    return arm_vt
             return None
         # HandleExpr.body is non-Optional Block; its .expr is also
         # non-Optional (vera/ast.py:481, 470).
@@ -1337,8 +1365,19 @@ class InferenceMixin:
         the clone-naming path must consult THIS method instead.  Returns
         ``None`` for builtins, generics, and fns with no NamedType return, so
         the caller falls back to ``_infer_vera_type``.
+
+        Gated on the #1284 ownership predicate over the LEXICAL scope
+        (#1299).  ``_fn_ret_type_exprs`` is flat — it holds every declaration
+        the compilation absorbed, including an imported module's private one
+        — and this override BEATS ``_infer_vera_type``, so an invisible
+        ``fn get(@Unit -> @Bool)`` named the clone ``idg$Bool`` at a call site
+        where the general inference had correctly answered the ``State<Int>``
+        cell's ``Int``.  A name no visible declaration owns contributes no
+        declared return: the caller falls back, and reaches the operation.
         """
         if call.name in self._generic_fn_info:
+            return None
+        if not bare_call_denotes_user_fn(call.name, self._scoped_fns):
             return None
         return declared_return_clone_key(
             self._fn_ret_type_exprs.get(call.name))

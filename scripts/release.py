@@ -26,12 +26,24 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT = "veralang"
+REPOSITORY = "aallan/vera"
 INDEX_JSON_URLS = {
     "pypi": f"https://pypi.org/pypi/{PROJECT}/json",
     "testpypi": f"https://test.pypi.org/pypi/{PROJECT}/json",
 }
 PACKAGE_AFFECTING_PATHS = ("LICENSE", "PYPI_README.md", "pyproject.toml", "vera")
 _VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+
+# GitHub refuses a release body over 125,000 characters with HTTP 422, and the
+# release workflow reaches that step AFTER the immutable PyPI upload and AFTER
+# the tag is cut (#1288).  The builder is therefore total: oversized notes are
+# condensed rather than allowed to fail the step.
+GITHUB_RELEASE_BODY_LIMIT = 125_000
+RELEASE_BODY_BUDGET = 120_000
+_SECTION_HEADING_RE = re.compile(r"^### .+$")
+_BULLET_LEAD_RE = re.compile(r"^- \*\*(?P<lead>.+?)\*\*")
+_BULLET_RE = re.compile(r"^-\s+(?P<text>\S.*)$")
+_ISSUE_LINK_RE = re.compile(r"\[#\d+\]\(https://github\.com/[^\s)]+\)")
 
 
 class ReleaseError(ValueError):
@@ -99,11 +111,20 @@ def version_at_ref(ref: str, root: Path = ROOT) -> str:
     return version
 
 
-def changelog_notes(text: str, version: str) -> str:
-    """Extract a non-empty, bullet-bearing release section."""
+@dataclass(frozen=True)
+class ChangelogSection:
+    """One release section of ``CHANGELOG.md``, with its heading date."""
+
+    version: str
+    date: str | None
+    notes: str
+
+
+def changelog_section(text: str, version: str) -> ChangelogSection:
+    """Extract a non-empty, bullet-bearing release section and its date."""
     parse_version(version)
     heading = re.compile(
-        rf"^## \[{re.escape(version)}\](?: - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})?\s*$",
+        rf"^## \[{re.escape(version)}\](?: - (?P<date>[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}))?\s*$",
         re.MULTILINE,
     )
     match = heading.search(text)
@@ -116,12 +137,130 @@ def changelog_notes(text: str, version: str) -> str:
         raise ReleaseError(
             f"CHANGELOG.md section [{version}] must contain at least one bullet"
         )
-    return notes
+    return ChangelogSection(version, match.group("date"), notes)
+
+
+def changelog_notes(text: str, version: str) -> str:
+    """Extract a non-empty, bullet-bearing release section."""
+    return changelog_section(text, version).notes
+
+
+def section_for_version(version: str, root: Path = ROOT) -> ChangelogSection:
+    """Read one release section from the checkout's changelog."""
+    return changelog_section(
+        (root / "CHANGELOG.md").read_text(encoding="utf-8"), version
+    )
 
 
 def notes_for_version(version: str, root: Path = ROOT) -> str:
     """Extract release notes from the checkout's changelog."""
-    return changelog_notes((root / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+    return section_for_version(version, root).notes
+
+
+def changelog_anchor(version: str, date: str | None) -> str:
+    """Return GitHub's heading anchor for a ``## [version] - date`` line."""
+    heading = f"[{version}]" + (f" - {date}" if date else "")
+    slug = "".join(
+        character
+        for character in heading.lower()
+        if character.isalnum() or character in "- "
+    )
+    return "#" + slug.replace(" ", "-")
+
+
+def _index_line(bullet: str) -> str:
+    """Condense one CHANGELOG bullet to its headline-index line.
+
+    The lead-in is the bullet's bold run, de-emphasised, and the reference is
+    the bullet's LAST issue or pull-request link — the rule that reproduces
+    the v0.1.10 manual recovery, whose attribution for at least one bullet sat
+    mid-prose rather than immediately after the bold run.  A bullet with no
+    bold run keeps its own text, so no bullet is ever dropped from the index.
+    """
+    lead_match = _BULLET_LEAD_RE.match(bullet)
+    if lead_match is not None:
+        lead = lead_match.group("lead")
+    else:
+        plain = _BULLET_RE.match(bullet)
+        if plain is None:  # pragma: no cover - callers filter on _BULLET_RE
+            raise ReleaseError(f"not a changelog bullet: {bullet!r}")
+        lead = plain.group("text")
+    links = _ISSUE_LINK_RE.findall(bullet)
+    return f"- {lead} ({links[-1]})" if links else f"- {lead}"
+
+
+def condense_notes(
+    section: ChangelogSection,
+    *,
+    repo: str = REPOSITORY,
+    budget: int = RELEASE_BODY_BUDGET,
+    limit: int = GITHUB_RELEASE_BODY_LIMIT,
+) -> str:
+    """Rewrite a release section as the headline index plus a CHANGELOG link.
+
+    The shape is the one the v0.1.10 release was completed by hand with: the
+    section's ``###`` subsection headers, one condensed line per bullet, and a
+    link to the canonical section at the tag — the CHANGELOG being the release
+    notes of record either way.
+    """
+    anchor = changelog_anchor(section.version, section.date)
+    dated = f"[{section.version}]" + (f" - {section.date}" if section.date else "")
+    # Worded against the threshold that actually fired.  Condensing starts
+    # at the budget, not at the hard limit, so a section in the band
+    # between them was published saying it was "past GitHub's
+    # 125,000-character limit" while being comfortably under it — a
+    # falsehood shipped verbatim in the release body (#1330 review).
+    preamble = (
+        f"The full release notes for this version are {len(section.notes):,} "
+        f"characters, past the {budget:,}-character budget this project "
+        f"publishes verbatim — GitHub's own limit is {limit:,} characters — so "
+        "this body carries the headline index and the canonical notes live in the "
+        f"CHANGELOG at the tag: **[CHANGELOG.md § {dated}]"
+        f"(https://github.com/{repo}/blob/v{section.version}/CHANGELOG.md{anchor})**"
+    )
+
+    lines: list[str] = []
+    bullets = 0
+    for line in section.notes.splitlines():
+        if _SECTION_HEADING_RE.match(line):
+            lines.append("")
+            lines.append(line)
+        elif _BULLET_RE.match(line):
+            lines.append(_index_line(line))
+            bullets += 1
+    if not bullets:
+        raise ReleaseError(
+            f"release section [{section.version}] condensed to no bullets"
+        )
+    return preamble + "\n" + "\n".join(lines).rstrip() + "\n"
+
+
+def release_body(
+    section: ChangelogSection,
+    *,
+    repo: str = REPOSITORY,
+    budget: int = RELEASE_BODY_BUDGET,
+    limit: int = GITHUB_RELEASE_BODY_LIMIT,
+) -> str:
+    """Return a release body that always fits GitHub's limit (#1288).
+
+    Within budget the section is published verbatim.  Past it the section is
+    condensed, and in the pathological case where even the index overflows the
+    index is truncated — the step must never be the thing that fails after the
+    immutable archives are already on PyPI.
+    """
+    if len(section.notes) <= budget:
+        return section.notes
+    condensed = condense_notes(section, repo=repo, budget=budget, limit=limit)
+    if len(condensed) <= limit:
+        return condensed
+    notice = (
+        f"\n\n_This index is truncated at {limit:,} characters; "
+        "the CHANGELOG link above carries every entry._\n"
+    )
+    kept = condensed[: limit - len(notice)]
+    cut = kept.rfind("\n")
+    return (kept[:cut] if cut > 0 else kept.rstrip()) + notice
 
 
 def validate_version_sync(root: Path = ROOT) -> None:
@@ -365,9 +504,10 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--confirm-version")
     prepare.add_argument("--github-output", type=Path, required=True)
 
-    notes = commands.add_parser("notes", help="extract a changelog release section")
+    notes = commands.add_parser("notes", help="build a release body that fits")
     notes.add_argument("--version", required=True)
     notes.add_argument("--output", type=Path, required=True)
+    notes.add_argument("--repo", default=REPOSITORY)
 
     manifest = commands.add_parser("manifest", help="write archive SHA-256 values")
     manifest.add_argument("--dist-dir", type=Path, default=Path("dist"))
@@ -398,10 +538,18 @@ def main(argv: list[str] | None = None) -> int:
             action = f"publish to {plan.target}" if plan.publish else "no release"
             print(f"Release plan for {plan.version}: {action}.")
         elif args.command == "notes":
+            section = section_for_version(args.version)
+            body = release_body(section, repo=args.repo)
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(
-                notes_for_version(args.version) + "\n", encoding="utf-8"
-            )
+            args.output.write_text(body.rstrip("\n") + "\n", encoding="utf-8")
+            # A pass-through returns the section itself, so length is the
+            # signal a reader can check against the printed numbers.
+            if len(body) != len(section.notes):
+                print(
+                    f"Release notes for {args.version} condensed from "
+                    f"{len(section.notes):,} to {len(body):,} characters "
+                    f"(GitHub's limit is {GITHUB_RELEASE_BODY_LIMIT:,})."
+                )
         elif args.command == "manifest":
             write_manifest(args.dist_dir, args.output)
         elif args.command == "assert-absent":

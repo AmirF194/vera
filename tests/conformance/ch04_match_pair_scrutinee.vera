@@ -1,0 +1,44 @@
+-- Conformance: match on a pair-represented scrutinee (Chapter 4)
+-- Tests: String and Array<T> match scrutinees, whose (ptr, len) pair binds
+-- into two consecutive locals rather than one (#1305).  The json_keys arm
+-- is the shape the issue was found on.
+private fn measure(@String -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match @String.0 {
+    @String -> string_length(@String.0)
+  }
+}
+
+private fn count(@Array<Int> -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match @Array<Int>.0 {
+    @Array<Int> -> array_length(@Array<Int>.0)
+  }
+}
+
+private fn key_count(@Json -> @Int)
+  requires(true)
+  ensures(@Int.result >= 0)
+  effects(pure)
+{
+  match json_keys(@Json.0) {
+    @Array<String> -> array_length(@Array<String>.0)
+  }
+}
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(@Int.result == 10)
+  effects(pure)
+{
+  match json_parse("{\"a\": 1, \"b\": 2}") {
+    Ok(@Json) -> key_count(@Json.0) + measure("hello") + count([1, 2, 3]),
+    Err(@String) -> 0 - 1
+  }
+}

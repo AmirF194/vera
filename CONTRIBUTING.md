@@ -89,11 +89,11 @@ dependencies. CI enforces that `uv.lock` stays current.
 
 ### Pre-commit Hooks
 
-The repository configures 35 hooks across two stages: 33 run at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) run at the push stage (after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
+The repository configures 36 hooks across two stages: 34 run at the commit stage (after `pre-commit install`), and 2 (`check-changelog-updated` and `uv-lock-check`, described below) run at the push stage (after `pre-commit install --hook-type pre-push`). Most commit-stage hooks have per-hook `files:` / `types:` filters — the `python` type-check only runs when Python files are staged; `check_readme_examples.py` only runs when `README.md` or Vera sources change, etc. A plain-text commit touching only one markdown file triggers a small subset; a compiler-level commit triggers most of them.
 
 ![The gate pipeline: file-filtered commit-stage hooks, the push-stage CHANGELOG and uv.lock gates, and CI re-running everything against the platform matrix before anything lands on protected main.](assets/diagrams/ci-gates.svg)
 
-The **commit-stage** hooks (33, each gated to relevant files) include:
+The **commit-stage** hooks (34, each gated to relevant files) include:
 
 - Trailing whitespace and file endings
 - YAML/TOML validity
@@ -102,7 +102,7 @@ The **commit-stage** hooks (33, each gated to relevant files) include:
 - Lint with ruff (default rules)
 - mypy type checking
 - pytest test suite
-- All conformance programs hold at their declared level — positives pass; the negatives fail `check` with their `expected_error` E-code
+- All conformance programs hold at their declared level — positives pass; the negatives fail at the stage their `expected_error_stage` names (`check` by default, or `compile` for a diagnostic the checker accepts and codegen refuses) with their `expected_error` E-code
 - All `.vera` examples type-check and verify cleanly
 - README, EXAMPLES.md, SKILL.md, HTML, and spec code blocks parse correctly
 - Documentation counts match live codebase
@@ -147,7 +147,7 @@ pytest --cov=vera         # with coverage
 VERA_JS_COVERAGE=1 pytest tests/test_browser.py -v  # JS coverage
 ```
 
-PRs touching `vera/browser/runtime.mjs` have JavaScript coverage tracked by Codecov (via V8's built-in coverage). See [TESTING.md](TESTING.md) for the full testing reference -- coverage data, test helpers, and guidelines for adding tests.  See [ENVIRONMENT.md](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, and debug flags like `VERA_EAGER_GC` for hunting GC-rooting bugs).
+PRs touching `vera/browser/runtime.mjs` have JavaScript coverage tracked by Codecov (via V8's built-in coverage). See [TESTING.md](TESTING.md) for the full testing reference -- coverage data, test helpers, and guidelines for adding tests.  See [ENVIRONMENT.md](ENVIRONMENT.md) for all `VERA_*` environment variables (provider keys, runtime knobs, and debug flags like `VERA_EAGER_GC` for hunting GC-rooting bugs and `VERA_DEBUG_HOST_ERRORS` for host-binding ones).
 
 **Doc-count gate**: any PR that adds tests will trip `scripts/check_doc_counts.py` if it doesn't also update the test counts in `TESTING.md` (per-file rows + overall total), `ROADMAP.md` (the "Where we are" line), and `README.md` (project-status line).  Run the script locally to see exactly which numbers need updating:
 
@@ -164,6 +164,8 @@ mypy vera/
 ```
 
 ### Validation Scripts
+
+Every Vera code block in the documentation is gated: the `check_*_examples` family replays each fence through the compiler — parsing at minimum, and for the spec, `docs/index.html` and `PYPI_README.md` the whole pipeline — so a fence cannot drift from the language it demonstrates.  The `examples/` corpus is held harder still: `check_examples.py` type-checks and verifies all of it, and `check_examples_run.py` runs it, so an example is gated as a program and not merely as text.
 
 ```bash
 python scripts/check_conformance.py      # verify all conformance programs
