@@ -2155,7 +2155,7 @@ class TestNetworkResponseUtf8Hygiene591:
       preserving the (rare) signal that bytes were non-UTF-8.
 
     - ``Inference.complete`` — explicit ``UnicodeDecodeError`` catch
-      that raises a Vera-shaped ``RuntimeError`` ("provider returned
+      that raises a Vera-shaped ``InferenceError`` ("provider returned
       a response body that is not valid UTF-8 (invalid byte at
       position N)").  Non-UTF-8 from an LLM API is genuinely broken;
       we want loud failure with a Vera-native message, not the
@@ -2252,12 +2252,12 @@ class TestNetworkResponseUtf8Hygiene591:
         m = re.search(
             r"except\s+UnicodeDecodeError[^\n]*?:\s*\n"
             r"(?:[^\n]*\n){0,10}?"  # up to 10 lines until raise
-            r"\s*raise\s+RuntimeError\(",
+            r"\s*raise\s+InferenceError\(",
             body,
         )
         assert m, (
             "_call_inference_provider must catch UnicodeDecodeError "
-            "and re-raise as a RuntimeError in the same handler "
+            "and re-raise as an InferenceError in the same handler "
             "block (#591).  Both substrings must appear in a "
             "contiguous except/raise structure — a stray "
             "`except UnicodeDecodeError` comment does not satisfy."
@@ -2275,7 +2275,7 @@ class TestNetworkResponseUtf8Hygiene591:
         # bounded `.{0,400}?` keeps the regex non-greedy enough to
         # stop at the close of the raise.
         m_msg = re.search(
-            r'raise\s+RuntimeError\(.{0,400}?"[^"]*not valid UTF-8',
+            r'raise\s+InferenceError\(.{0,400}?"[^"]*not valid UTF-8',
             body,
             flags=re.DOTALL,
         )

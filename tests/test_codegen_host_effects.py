@@ -736,7 +736,11 @@ class TestInferenceProviderDispatch:
         from unittest.mock import patch, MagicMock
         from vera.runtime.inference import _call_inference_provider
 
-        body = json.dumps({"content": [{"text": "hello"}]})
+        # Every block in a Messages response carries a `type` discriminator,
+        # and the parse selects on it (#1333) — an untyped block is a shape
+        # the API never sends, and asserting against one would pin the test
+        # to a leniency the fix deliberately does not grant.
+        body = json.dumps({"content": [{"type": "text", "text": "hello"}]})
         mock_urlopen = MagicMock(return_value=self._make_response(body))
         with patch("urllib.request.urlopen", mock_urlopen):
             result = _call_inference_provider("anthropic", "prompt", "", "sk-ant")
@@ -987,7 +991,7 @@ class TestInferenceProviderDispatch:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.
 
         The auto-detection loop scans _PROVIDERS in order and picks the first
-        provider whose key is present in the environment.  With anthropic first
+        provider whose key holds a non-empty value.  With anthropic first
         in the registry, setting both VERA_ANTHROPIC_API_KEY and
         VERA_MOONSHOT_API_KEY must resolve to 'anthropic'.
         """
@@ -1038,7 +1042,9 @@ class TestInferenceProviderDispatch:
         from unittest.mock import patch, MagicMock
         from vera.runtime.inference import _call_inference_provider
 
-        body = json.dumps({"content": [{"text": "ok"}]})
+        # Typed block: see `test_anthropic_provider` — the parse selects on
+        # `type` (#1333), so an untyped block is not a valid success fixture.
+        body = json.dumps({"content": [{"type": "text", "text": "ok"}]})
         mock_urlopen = MagicMock(return_value=self._make_response(body))
         with patch("urllib.request.urlopen", mock_urlopen):
             _call_inference_provider("anthropic", "hi", "claude-opus-4-6", "sk-ant")
@@ -1047,10 +1053,16 @@ class TestInferenceProviderDispatch:
         assert sent["model"] == "claude-opus-4-6"
 
     def test_unknown_provider_raises(self) -> None:
-        """Unknown provider string raises ValueError."""
-        from vera.runtime.inference import _call_inference_provider
+        """Unknown provider string raises InferenceError.
+
+        Was `ValueError` until the #1333 review: every deliberate refusal in
+        the module now raises the one class the host boundary publishes
+        verbatim, so that the boundary needs a single rule rather than a
+        list of stdlib types an unforeseen failure also raises.
+        """
+        from vera.runtime.inference import _call_inference_provider, InferenceError
         import pytest
-        with pytest.raises(ValueError, match="Unknown inference provider"):
+        with pytest.raises(InferenceError, match="Unknown inference provider"):
             _call_inference_provider("unknown", "p", "", "")
 
 

@@ -10,7 +10,7 @@ Vera reads a small set of `VERA_*` environment variables.  This document is the 
 | [`VERA_MISTRAL_API_KEY`](#inference-provider-keys) | Mistral provider key for the `Inference` effect | runtime | as above |
 | [`VERA_XAI_API_KEY`](#inference-provider-keys) | xAI (Grok) provider key for the `Inference` effect | runtime | as above |
 | [`VERA_DEEPSEEK_API_KEY`](#inference-provider-keys) | DeepSeek provider key for the `Inference` effect | runtime | as above |
-| [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) | Force a specific provider rather than auto-detecting from the keys present | runtime | optional |
+| [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) | Force a specific provider rather than auto-detecting from the non-empty keys | runtime | optional |
 | [`VERA_INFERENCE_MODEL`](#explicit-provider--model-overrides) | Override the provider's default model | runtime | optional |
 | [`VERA_DB_URL`](#vera_db_url) | Database connection for the `DB` effect | runtime | optional (defaults to `sqlite::memory:`) |
 | [`VERA_JS_COVERAGE`](#vera_js_coverage) | Opt-in V8 coverage during browser-parity tests | dev / CI | optional |
@@ -19,7 +19,7 @@ Vera reads a small set of `VERA_*` environment variables.  This document is the 
 
 ## Inference provider keys
 
-The `Inference` effect ([spec/07-effects.md](spec/07-effects.md)) reaches an LLM provider over HTTP.  The runtime auto-detects which provider to use by checking which of these six variables is set:
+The `Inference` effect ([spec/07-effects.md](spec/07-effects.md)) reaches an LLM provider over HTTP.  The runtime auto-detects which provider to use by checking which of these six variables is set to a non-empty value:
 
 - `VERA_ANTHROPIC_API_KEY`
 - `VERA_OPENAI_API_KEY`
@@ -28,7 +28,7 @@ The `Inference` effect ([spec/07-effects.md](spec/07-effects.md)) reaches an LLM
 - `VERA_XAI_API_KEY` (Grok)
 - `VERA_DEEPSEEK_API_KEY`
 
-The order above is the registry order, and detection walks it and takes the **first** provider whose key is set — so setting more than one key is deterministic rather than ambiguous, but silently ignores every key after the first.  Set exactly one, or use [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) to name the one you mean.  The conformance tests `tests/conformance/ch09_inference.vera` and `tests/conformance/ch09_http.vera` are skipped in CI because no provider key is set there; to run them locally:
+The order above is the registry order, and detection walks it and takes the **first** provider whose key is set to a NON-EMPTY value — a variable exported as the empty string is skipped, as if unset — so setting more than one key is deterministic rather than ambiguous, but silently ignores every key after the first.  Set exactly one, or use [`VERA_INFERENCE_PROVIDER`](#explicit-provider--model-overrides) to name the one you mean.  The conformance tests `tests/conformance/ch09_inference.vera` and `tests/conformance/ch09_http.vera` are skipped in CI because no provider key is set there; to run them locally:
 
 ```bash
 export VERA_ANTHROPIC_API_KEY=sk-ant-...   # or any other key above, e.g. VERA_XAI_API_KEY=xai-...
