@@ -41,6 +41,7 @@ No test here touches the network.
 """
 from __future__ import annotations
 
+import ast
 import email.message
 import io
 import json
@@ -641,6 +642,88 @@ class TestOpenAiStyleContent1333:
         assert _call("openai", first) == "Positive"
         assert _call("openai", second) == "Positive"
 
+    def test_malformed_part_under_the_unread_discriminator_is_not_reached(self) -> None:
+        """Preference decides BEFORE the other discriminator is validated.
+
+        `text` yields the answer, so the `output_text` part is never
+        scanned and its missing `text` field never raises — which is the
+        difference between preference and a union: scanning both would
+        refuse a response the provider filled in correctly under the
+        spelling we prefer. The mirror shows the same rule biting when the
+        malformed part IS the one selected.
+        """
+        preferred_wins = _openai_body([
+            {"type": "text", "text": "Positive"},
+            {"type": "output_text"},
+        ])
+        assert _call("openai", preferred_wins) == "Positive"
+
+        malformed_is_selected = _openai_body([
+            {"type": "text"},
+            {"type": "output_text", "text": "Positive"},
+        ])
+        with pytest.raises(
+            InferenceError, match=r"text part with no 'text' field",
+        ):
+            _call("openai", malformed_is_selected)
+
+    #: Blank fragments a shim plausibly emits.  `""` alone was the round-9
+    #: fixture and passed while `"   "` and `"\n"` did not: the hit test
+    #: was truthiness where the blank test downstream was `.strip()`, so a
+    #: whitespace-only part counted as an answer.
+    _BLANK_FRAGMENTS = ("", "   ", "\n")
+
+    @pytest.mark.parametrize("blank", _BLANK_FRAGMENTS, ids=["empty", "spaces", "newline"])
+    def test_blank_text_part_does_not_shadow_a_real_output_text_part(
+        self, blank: str,
+    ) -> None:
+        """A BLANK `text` part, of any spelling, must not hide the answer.
+
+        Truthiness let `"   "` short-circuit the loop and return itself,
+        losing the `output_text` part carrying the completion. Both
+        orders, since the list order is the provider's to choose.
+        """
+        first = _openai_body([
+            {"type": "text", "text": blank},
+            {"type": "output_text", "text": "Positive"},
+        ])
+        second = _openai_body([
+            {"type": "output_text", "text": "Positive"},
+            {"type": "text", "text": blank},
+        ])
+        assert _call("openai", first) == "Positive"
+        assert _call("openai", second) == "Positive"
+
+    @pytest.mark.parametrize("blank", _BLANK_FRAGMENTS, ids=["empty", "spaces", "newline"])
+    def test_blank_parts_list_with_a_refusal_matches_the_string_form(
+        self, blank: str,
+    ) -> None:
+        """The list form applies the refusal rule the string form applied.
+
+        Round 9 claimed both forms; it held for the list form only when
+        the fragment was exactly `""`. `"   "` returned `Ok("   ")` and
+        discarded the refusal, while `content: "   "` with the same
+        refusal raised — an asymmetry with no reason a caller could see.
+        """
+        body = _openai_body_with(
+            [{"type": "text", "text": blank}],
+            message={"refusal": "I decline."},
+        )
+        with pytest.raises(InferenceError, match=r"refused the request: I decline\."):
+            _call("openai", body)
+        # The string form, same input, same outcome — the point of the cell.
+        string_form = _openai_body_with(blank, message={"refusal": "I decline."})
+        with pytest.raises(InferenceError, match=r"refused the request: I decline\."):
+            _call("openai", string_form)
+
+    @pytest.mark.parametrize("blank", _BLANK_FRAGMENTS, ids=["empty", "spaces", "newline"])
+    def test_blank_completion_without_a_reason_is_returned_unchanged(
+        self, blank: str,
+    ) -> None:
+        """The paired negative: no refusal, no truncation, so it is a value."""
+        assert _call("openai", _openai_body([{"type": "text", "text": blank}])) == blank
+        assert _call("openai", _openai_body(blank)) == blank
+
     def test_all_empty_fragments_remain_an_empty_completion(self) -> None:
         """The paired negative: nothing to prefer means the answer is "".
 
@@ -1140,6 +1223,119 @@ class TestInferenceBoundaryEndToEnd1333:
 
 
 # =====================================================================
+# An empty completion the provider itself explained
+# =====================================================================
+
+
+class TestEmptyCompletionWithAReason1333:
+    """`Ok("")` is right until the provider says why the answer is empty.
+
+    Round 9 closed this on the OpenAI branch for `message.refusal` only.
+    The Anthropic branch had no such rule at all: a response whose sole
+    text block was `""` under `stop_reason: "refusal"` came back as a
+    successful empty completion with the reason discarded — and under
+    `max_tokens`, which is #1333's own species, a thinking block having
+    eaten the budget before any text was emitted.
+
+    The rule is symmetric and narrow. An EMPTY (or whitespace-only)
+    completion is an error when the provider marked the turn a refusal or
+    a truncation; under `end_turn` / `stop` / no reason at all it stays
+    `Ok("")`, and a NON-empty reply under `max_tokens` / `length` is
+    returned unchanged, truncated-but-present output still being the
+    model's answer.
+    """
+
+    #: (label, provider, body, expected reason token in the message)
+    _FAILING = (
+        ("anthropic refusal", "anthropic",
+         _anthropic_body_with({"stop_reason": "refusal"},
+                              {"type": "text", "text": ""}),
+         "stop_reason=refusal"),
+        ("anthropic refusal, whitespace", "anthropic",
+         _anthropic_body_with({"stop_reason": "refusal"},
+                              {"type": "text", "text": "   "}),
+         "stop_reason=refusal"),
+        ("anthropic max_tokens", "anthropic",
+         _anthropic_body_with({"stop_reason": "max_tokens"},
+                              {"type": "text", "text": ""}),
+         "stop_reason=max_tokens"),
+        ("anthropic max_tokens, whitespace", "anthropic",
+         _anthropic_body_with({"stop_reason": "max_tokens"},
+                              {"type": "text", "text": " \n "}),
+         "stop_reason=max_tokens"),
+        ("openai length, string", "openai",
+         _openai_body_with("", choice={"finish_reason": "length"}),
+         "finish_reason=length"),
+        ("openai length, whitespace string", "openai",
+         _openai_body_with("   ", choice={"finish_reason": "length"}),
+         "finish_reason=length"),
+        ("openai length, parts list", "openai",
+         _openai_body_with([{"type": "text", "text": ""}],
+                           choice={"finish_reason": "length"}),
+         "finish_reason=length"),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "provider", "body", "token"),
+        _FAILING,
+        ids=[row[0] for row in _FAILING],
+    )
+    def test_empty_completion_with_a_reason_is_an_error(
+        self, label: str, provider: str, body: str, token: str,
+    ) -> None:
+        """The Err names the provider, the model, and the reason token.
+
+        The literal `stop_reason=refusal` / `finish_reason=length` is
+        asserted rather than merely "some reason": it is the token a
+        downstream consumer greps for to tell a refusal from a truncation
+        from an ordinary failure.
+        """
+        with pytest.raises(InferenceError) as excinfo:
+            _call(provider, body)
+        message = str(excinfo.value)
+        assert "returned an empty completion" in message
+        assert token in message
+        assert _PROVIDERS[provider].default_model in message
+        assert provider in message
+
+    #: The same shapes under a reason that does NOT explain emptiness, and
+    #: the non-empty counterparts. These are the cells that keep the rule
+    #: narrow — without them "empty is an error" would pass just as well.
+    _UNCHANGED = (
+        ("anthropic end_turn empty", "anthropic",
+         _anthropic_body_with({"stop_reason": "end_turn"},
+                              {"type": "text", "text": ""}), ""),
+        ("anthropic no reason empty", "anthropic",
+         _anthropic_body({"type": "text", "text": ""}), ""),
+        ("anthropic max_tokens non-empty", "anthropic",
+         _anthropic_body_with({"stop_reason": "max_tokens"},
+                              {"type": "text", "text": "Yes"}), "Yes"),
+        ("anthropic end_turn whitespace", "anthropic",
+         _anthropic_body_with({"stop_reason": "end_turn"},
+                              {"type": "text", "text": "   "}), "   "),
+        ("openai stop empty", "openai",
+         _openai_body_with("", choice={"finish_reason": "stop"}), ""),
+        ("openai no reason empty", "openai", _openai_body(""), ""),
+        ("openai length non-empty", "openai",
+         _openai_body_with("Yes", choice={"finish_reason": "length"}), "Yes"),
+        ("openai stop, empty parts list", "openai",
+         _openai_body_with([{"type": "text", "text": ""}],
+                           choice={"finish_reason": "stop"}), ""),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "provider", "body", "expected"),
+        _UNCHANGED,
+        ids=[row[0] for row in _UNCHANGED],
+    )
+    def test_everything_else_is_returned_unchanged(
+        self, label: str, provider: str, body: str, expected: str,
+    ) -> None:
+        """Exactly as v0.1.12 returned it."""
+        assert _call(provider, body) == expected
+
+
+# =====================================================================
 # Every message is bounded, whatever the provider sends
 # =====================================================================
 
@@ -1368,40 +1564,85 @@ class TestCredentialRedaction1333:
         "_reason_clause", "_missing_or_wrong", "_text_fragments",
     )
 
-    #: How many call sites hand `api_key` to one of those helpers today,
-    #: measured with the `def` lines excluded (a signature is not a call).
+    #: How many call sites hand `api_key` to one of those helpers today.
     #: A literal, so ADDING a render site fails this cell and forces the
-    #: author to decide whether it needs a route row above.
-    _API_KEY_RENDER_SITES = 22
+    #: author to decide whether it needs a route row above.  Measured by
+    #: the AST walk below: 23 at 157ae167 and 24 here, the difference
+    #: being this round's `_reason_clause` call inside
+    #: `_empty_completion_error`.
+    _API_KEY_RENDER_SITES = 24
+
+    #: Rows in the route table, pinned separately from the site count: the
+    #: two answer different questions, and a deleted row is invisible to
+    #: the other.
+    _LEAK_ROUTE_COUNT = 12
 
     def test_every_api_key_render_site_is_accounted_for(self) -> None:
         """A new render site must be classified, not silently uncovered.
 
-        This does NOT prove each site maps to a row — several sites share
-        one route (`_error_body_detail` alone calls `_safe` five times for
-        the single rejection-body route), so a count-equality assertion
-        between sites and rows would be false by construction. What it
-        pins is the thing that actually went wrong: four render sites were
-        added over three rounds and none of them got a row, and nothing
-        failed. Changing the count now fails here, with the route table
-        named in the message.
+        This does NOT claim a one-to-one map: several sites share a route
+        (`_error_body_detail` alone calls `_safe` five times for the single
+        rejection-body route), so asserting count equality between sites
+        and rows would be false by construction. What it pins is the thing
+        that went wrong — four render sites were added over three rounds,
+        none got a row, and nothing failed.
+
+        Counted by parsing the module rather than by regex. The pattern
+        this replaced nested a quantifier inside a repeated group, which
+        backtracks badly on a long call that never matches; our own source
+        is the input, so the cost was a slow gate rather than a
+        vulnerability. It was also WRONG — it read 22 where the true count
+        was 23, missing a positional `api_key` in a call spread over
+        enough lines. The walk reads each renderer's own signature for the
+        parameter's position, so positional and keyword sites both count
+        and a `def` line is a signature rather than a call by
+        construction.
         """
         source = (
             Path(__file__).resolve().parent.parent
             / "vera" / "runtime" / "inference.py"
         ).read_text(encoding="utf-8")
-        # Tolerates one level of nested parens and multi-line calls.
-        sites = sum(
-            len(re.findall(
-                rf"(?<!def )\b{name}\((?:[^()]|\([^()]*\))*api_key", source,
-            ))
-            for name in self._RENDERERS
+        tree = ast.parse(source)
+
+        api_key_index: dict[str, int] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in self._RENDERERS:
+                names = [a.arg for a in node.args.args]
+                if "api_key" in names:
+                    api_key_index[node.name] = names.index("api_key")
+        assert set(api_key_index) == set(self._RENDERERS), (
+            f"renderers without an `api_key` parameter: "
+            f"{sorted(set(self._RENDERERS) - set(api_key_index))} — the "
+            f"list is stale, or a helper stopped taking the key"
         )
+
+        sites = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else None
+            if name not in api_key_index:
+                continue
+            if any(kw.arg == "api_key" for kw in node.keywords) or (
+                len(node.args) > api_key_index[name]
+            ):
+                sites += 1
+
         assert sites == self._API_KEY_RENDER_SITES, (
             f"{sites} render sites take `api_key`, expected "
             f"{self._API_KEY_RENDER_SITES}. A site was added or removed: "
             f"decide whether it needs a row in _LEAK_ROUTES (which has "
             f"{len(self._LEAK_ROUTES)}), then update this count."
+        )
+        # The second tripwire, and it is not redundant: the site count is
+        # blind to the TABLE, so deleting a route row left the suite green
+        # and one cell lighter. A literal here makes that fail loud.
+        assert len(self._LEAK_ROUTES) == self._LEAK_ROUTE_COUNT, (
+            f"_LEAK_ROUTES has {len(self._LEAK_ROUTES)} rows, expected "
+            f"{self._LEAK_ROUTE_COUNT}. A row was added or deleted; the "
+            f"table IS the redaction invariant, so removing one silently "
+            f"drops a route from cover."
         )
 
     @pytest.mark.parametrize(
@@ -1511,6 +1752,25 @@ class TestCredentialRedaction1333:
         assert self._OPAQUE_KEY not in message
         assert "[redacted]" in message
         assert "rejected key" in message
+
+    def test_a_one_character_key_is_still_redacted(self) -> None:
+        """No minimum-length floor on the exact-key rule — deliberately.
+
+        A pathologically short key redacts incidental text too: with the
+        key `a`, `stop_reason=max_tokens` renders as
+        `stop_reason=m[redacted]x_tokens`. That is accepted rather than
+        fixed. Every registered provider issues keys of twenty characters
+        or more, so a one-character key cannot authenticate and the
+        cosmetic damage appears only on runs that were already failing —
+        whose Err still carries provider, model and status. A length floor
+        would instead stop redacting short REAL tokens from a self-hosted
+        gateway, trading a cosmetic defect for a security one.
+        """
+        message = self._err_for("upstream rejected a", key="a")
+        assert "[redacted]" in message
+        # The rest of the Err survives, which is what makes the trade sound.
+        assert "401" in message
+        assert "anthropic" in message
 
     def test_ordinary_words_are_not_redacted(self) -> None:
         """The paired negative: redaction that eats prose is a different bug.

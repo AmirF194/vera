@@ -276,6 +276,48 @@ def _reason_clause(container: object, field: str, api_key: str = "") -> str:
     return f"; {field}={_or_blank(_safe(str(value), api_key))}"
 
 
+#: Reason values under which an EMPTY completion is a failure rather than a
+#: value the model produced.  `refusal` says the model declined; `max_tokens`
+#: (Anthropic) and `length` (OpenAI-style) say the provider cut the reply off
+#: before it reached any text — the #1333 species exactly, a thinking block
+#: exhausting the request's budget.  Under `end_turn` / `stop` / no reason at
+#: all an empty completion is a value the model chose to give, and stays
+#: `Ok("")`.
+_EMPTY_COMPLETION_FAILURES = ("refusal", "max_tokens", "length")
+
+
+def _empty_completion_error(
+    text: str,
+    container: object,
+    field: str,
+    provider: str,
+    model: str,
+    api_key: str,
+) -> InferenceError | None:
+    """The error for an empty completion the provider itself explained, or None.
+
+    Returning `Ok("")` for a reply the provider says it truncated hands the
+    caller an answer the model never finished, with the one field that said
+    so discarded — the same shape as #1333's original defect, one turn
+    later.  Symmetric across both branches, since both spell the signal
+    differently and neither is more authoritative than the other.
+
+    Scoped deliberately: only an EMPTY (or whitespace-only) completion is
+    affected.  A non-empty reply under `max_tokens` / `length` is returned
+    unchanged — truncated-but-present output is still the model's answer,
+    and refusing it would be a behaviour change well beyond this fix.
+    """
+    if text.strip():
+        return None
+    reason = container.get(field) if isinstance(container, dict) else None
+    if not isinstance(reason, str) or reason not in _EMPTY_COMPLETION_FAILURES:
+        return None
+    return InferenceError(
+        f"Inference provider '{provider}' ({model}) returned an empty "
+        f"completion{_reason_clause(container, field, api_key)}.",
+    )
+
+
 def _missing_or_wrong(
     container: object,
     field: str,
@@ -569,7 +611,13 @@ def _call_inference_provider(
         # Joined without a separator: consecutive text blocks are
         # fragments of one message, so concatenation reconstructs
         # exactly what the model emitted.
-        return "".join(texts)
+        joined = "".join(texts)
+        empty_error = _empty_completion_error(
+            joined, data, "stop_reason", provider, chosen_model, api_key,
+        )
+        if empty_error is not None:
+            raise empty_error
+        return joined
 
     # openai-style
     choices = data.get("choices") if isinstance(data, dict) else None
@@ -638,6 +686,13 @@ def _call_inference_provider(
         refusal = message.get("refusal")
         if isinstance(refusal, str) and refusal.strip():
             raise _refusal_or("the completion was empty")
+        # `finish_reason` is the other half of the same rule, and lives on
+        # the CHOICE rather than the message.
+        empty_error = _empty_completion_error(
+            text, first, "finish_reason", provider, chosen_model, api_key,
+        )
+        if empty_error is not None:
+            raise empty_error
         return text
 
     content = message.get("content")
@@ -653,31 +708,35 @@ def _call_inference_provider(
         # is never consulted rather than merged.
         parts: list[str] = []
         joined = ""
-        # Whether ANY discriminator produced fragments, which `parts`
-        # cannot answer: it holds only the last discriminator's result, so
-        # an empty-fragment hit under `text` was erased by the empty list
-        # under `output_text` and a legitimate `Ok("")` became an error.
-        saw_fragments = False
+        # The FIRST discriminator that produced fragments at all, which
+        # `parts` cannot answer: it holds only the last discriminator's
+        # result, so a hit under `text` was erased by the empty list under
+        # `output_text` and a legitimate blank answer became an error.
+        first_result: str | None = None
         for _discriminator in _OPENAI_TEXT_TYPES:
             parts = _text_fragments(
                 content, provider, chosen_model, "text part",
                 (_discriminator,), api_key,
             )
-            # A hit is a non-empty RESULT, not a non-empty list.  Treating
-            # `[""]` as a hit let an empty `text` part shadow a real
-            # `output_text` one — `[{"type":"text","text":""},
-            # {"type":"output_text","text":"Positive"}]` returned `Ok("")`
-            # in either order, losing the completion the provider sent.
-            saw_fragments = saw_fragments or bool(parts)
+            if parts and first_result is None:
+                first_result = "".join(parts)
             joined = "".join(parts)
-            if joined:
+            # A hit is a result with TEXT in it, tested the same way
+            # `_completion_or_refusal` tests it.  Truthiness was the
+            # wrong test twice over: `[""]` counted as a hit, and so did
+            # `["   "]`, so a whitespace-only `text` part short-circuited
+            # the loop and both shadowed a real `output_text` part and
+            # skipped the refusal check the string form applied.
+            if joined.strip():
                 break
-        if joined:
+        if joined.strip():
             return joined
-        if saw_fragments:
-            # Every discriminator yielded only empty fragments.  That is a
-            # genuinely empty completion, not a missing one.
-            return _completion_or_refusal(joined)
+        if first_result is not None:
+            # Every discriminator yielded only blank fragments.  That may
+            # be a genuinely blank completion — `_completion_or_refusal`
+            # applies the refusal and truncation rules and otherwise
+            # returns it unchanged.
+            return _completion_or_refusal(first_result)
         raise _refusal_or(
             f"no text parts in the message content; "
             f"part types: {_describe_types(content, api_key)}"
