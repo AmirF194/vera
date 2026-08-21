@@ -736,7 +736,11 @@ class TestInferenceProviderDispatch:
         from unittest.mock import patch, MagicMock
         from vera.runtime.inference import _call_inference_provider
 
-        body = json.dumps({"content": [{"text": "hello"}]})
+        # Every block in a Messages response carries a `type` discriminator,
+        # and the parse selects on it (#1333) — an untyped block is a shape
+        # the API never sends, and asserting against one would pin the test
+        # to a leniency the fix deliberately does not grant.
+        body = json.dumps({"content": [{"type": "text", "text": "hello"}]})
         mock_urlopen = MagicMock(return_value=self._make_response(body))
         with patch("urllib.request.urlopen", mock_urlopen):
             result = _call_inference_provider("anthropic", "prompt", "", "sk-ant")
@@ -1038,7 +1042,9 @@ class TestInferenceProviderDispatch:
         from unittest.mock import patch, MagicMock
         from vera.runtime.inference import _call_inference_provider
 
-        body = json.dumps({"content": [{"text": "ok"}]})
+        # Typed block: see `test_anthropic_provider` — the parse selects on
+        # `type` (#1333), so an untyped block is not a valid success fixture.
+        body = json.dumps({"content": [{"type": "text", "text": "ok"}]})
         mock_urlopen = MagicMock(return_value=self._make_response(body))
         with patch("urllib.request.urlopen", mock_urlopen):
             _call_inference_provider("anthropic", "hi", "claude-opus-4-6", "sk-ant")
