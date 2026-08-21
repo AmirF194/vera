@@ -179,6 +179,42 @@ def _stop_reason_clause(data: object) -> str:
     return f"; stop_reason={reason}"
 
 
+def _text_fragments(
+    items: list[object], provider: str, model: str, kind: str,
+) -> list[str]:
+    """Every `type == "text"` entry's text, in order, as strings.
+
+    The `str()` this replaced was a silent-wrong-answer generator of
+    exactly the kind #1333 exists to close, one level deeper than the
+    `content: null` case fixed with it: a selected text block whose
+    `text` is `null` coerced to the string `"None"` and reached the Vera
+    program as a SUCCESSFUL completion, and a `text` holding an object
+    reached it as a Python repr.  A response the provider did not fill
+    in is a refusal to report, never a value to stringify — so only a
+    real `str` is accepted and anything else names its own type.
+
+    A `type == "text"` entry with no `text` key at all is skipped rather
+    than refused: it yields no fragment, so the caller's existing
+    no-text-block error covers it, and that message already reports the
+    block types it saw.
+    """
+    fragments: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        if "text" not in item:
+            continue
+        value = item["text"]
+        if not isinstance(value, str):
+            raise InferenceError(
+                f"Inference provider '{provider}' ({model}) returned a "
+                f"{kind} whose text is {type(value).__name__}, not a "
+                f"string.",
+            )
+        fragments.append(value)
+    return fragments
+
+
 def _error_body_detail(raw: bytes) -> str:
     """The provider's own message out of an HTTP error body.
 
@@ -320,13 +356,7 @@ def _call_inference_provider(
                 f"no text block (no 'content' list in the response; "
                 f"response keys: {_describe_keys(data)}).",
             )
-        texts = [
-            str(block["text"])
-            for block in content
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and "text" in block
-        ]
+        texts = _text_fragments(content, provider, chosen_model, "text block")
         if not texts:
             # `stop_reason` is what distinguishes "the model chose to say
             # nothing" from "the reply was cut off before it got to the
@@ -358,13 +388,7 @@ def _call_inference_provider(
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [
-            str(part["text"])
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and "text" in part
-        ]
+        parts = _text_fragments(content, provider, chosen_model, "text part")
         if parts:
             return "".join(parts)
         raise InferenceError(

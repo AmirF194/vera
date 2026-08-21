@@ -213,6 +213,57 @@ class TestAnthropicContentBlocks1333:
         )
         assert _call("anthropic", body) == "Neutral"
 
+    #: `text` values that are NOT strings.  `str()` turned every one of
+    #: these into a SUCCESSFUL completion: `null` became the string
+    #: "None", a number became its digits, and an object became a Python
+    #: repr — the #1333 leak class one level deeper than the
+    #: `content: null` case closed alongside it.  The repr row is the
+    #: sharpest: `"{'a': 1}"` is Python's own spelling reaching a Vera
+    #: program as the model's answer.
+    _NON_STRING_TEXT = (
+        (None, "NoneType"),
+        (123, "int"),
+        ({"a": 1}, "dict"),
+    )
+
+    @pytest.mark.parametrize(
+        ("value", "type_name"),
+        _NON_STRING_TEXT,
+        ids=[row[1] for row in _NON_STRING_TEXT],
+    )
+    def test_non_string_text_block_is_a_named_error(
+        self, value: Any, type_name: str,
+    ) -> None:
+        """A selected block whose `text` is not a string is refused, not coerced.
+
+        `pytest.raises` is the load-bearing half: the defect was that this
+        RETURNED, so any completion at all fails the cell before a single
+        assertion on the message runs.
+        """
+        body = _anthropic_body({"type": "text", "text": value})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", body)
+        message = str(excinfo.value)
+        assert "anthropic" in message
+        assert "claude-opus-5" in message
+        assert f"whose text is {type_name}, not a string" in message
+
+    def test_bad_text_block_refuses_even_when_a_good_one_follows(self) -> None:
+        """The refusal wins over the salvageable remainder — deliberately.
+
+        Skipping the malformed block and joining the rest would return a
+        completion the provider never sent as a whole, and the caller
+        could not tell it was short.  A response with a `null` text is
+        evidence something went wrong upstream, so it is reported rather
+        than partially honoured.
+        """
+        body = _anthropic_body(
+            {"type": "text", "text": None},
+            {"type": "text", "text": "Positive"},
+        )
+        with pytest.raises(InferenceError, match=r"whose text is NoneType"):
+            _call("anthropic", body)
+
     def test_no_text_block_names_provider_model_and_block_types(self) -> None:
         """A text-free response is an error that says whose it was."""
         body = _anthropic_body({"type": "thinking", "thinking": "..."})
@@ -323,6 +374,28 @@ class TestOpenAiStyleContent1333:
             {"type": "text", "text": " indeed"},
         ])
         assert _call("openai", body) == "Positive indeed"
+
+    @pytest.mark.parametrize(
+        ("value", "type_name"),
+        TestAnthropicContentBlocks1333._NON_STRING_TEXT,
+        ids=[row[1] for row in TestAnthropicContentBlocks1333._NON_STRING_TEXT],
+    )
+    def test_non_string_text_part_is_a_named_error(
+        self, value: Any, type_name: str,
+    ) -> None:
+        """The parts list gets the same refusal as the Anthropic blocks.
+
+        Both families share one extractor, and the table is shared with
+        it rather than retyped, so a row added on one side cannot be
+        forgotten on the other.
+        """
+        body = _openai_body([{"type": "text", "text": value}])
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", body)
+        message = str(excinfo.value)
+        assert "openai" in message
+        assert "gpt-5.6-sol" in message
+        assert f"whose text is {type_name}, not a string" in message
 
     def test_null_content_is_a_named_error(self) -> None:
         """A reasoning/tool-call turn with `content: null`.
@@ -494,6 +567,22 @@ class TestInferenceBoundaryEndToEnd1333:
         assert stdout != "'text'"
         assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
         assert "thinking" in stdout
+
+    def test_non_string_text_block_err_reaches_the_program(self) -> None:
+        """End to end: `text: null` is an Err, never `Ok("None")`.
+
+        The unit cells prove the extractor refuses; this proves the
+        refusal survives to the value a Vera program matches on — which
+        is where the silent wrong answer would have been observed.
+        """
+        body = _anthropic_body({"type": "text", "text": None})
+        value, stdout = _run_with_transport(body)
+        assert value == 1
+        assert stdout != "None"
+        assert stdout == (
+            "Inference provider 'anthropic' (claude-opus-5) returned a "
+            "text block whose text is NoneType, not a string."
+        )
 
     def test_http_rejection_err_names_provider_and_code(self) -> None:
         body = json.dumps({"error": {"message": "invalid x-api-key"}})
