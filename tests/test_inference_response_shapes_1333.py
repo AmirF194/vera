@@ -398,7 +398,15 @@ class TestHttpRejectionMessages1333:
         assert "anthropic" in message
         assert "not valid UTF-8" in message
         assert "position 6" in message  # len(b"hello ") — the first bad byte
+        # The #591 property proper: none of Python's own codec spelling
+        # survives into a value a Vera program can print or match on.  These
+        # two guard a different regression from the assertions above — a
+        # bare strict decode fails this cell at `pytest.raises`, before any
+        # message is read, whereas a handler that keeps the catch and
+        # interpolates the exception (`RuntimeError(f"... {ude}")`) would
+        # satisfy every positive assertion and re-leak the codec text.
         assert "codec can't decode" not in message
+        assert "invalid start byte" not in message
 
 
 # =====================================================================
