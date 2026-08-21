@@ -1053,10 +1053,16 @@ class TestInferenceProviderDispatch:
         assert sent["model"] == "claude-opus-4-6"
 
     def test_unknown_provider_raises(self) -> None:
-        """Unknown provider string raises ValueError."""
-        from vera.runtime.inference import _call_inference_provider
+        """Unknown provider string raises InferenceError.
+
+        Was `ValueError` until the #1333 review: every deliberate refusal in
+        the module now raises the one class the host boundary publishes
+        verbatim, so that the boundary needs a single rule rather than a
+        list of stdlib types an unforeseen failure also raises.
+        """
+        from vera.runtime.inference import _call_inference_provider, InferenceError
         import pytest
-        with pytest.raises(ValueError, match="Unknown inference provider"):
+        with pytest.raises(InferenceError, match="Unknown inference provider"):
             _call_inference_provider("unknown", "p", "", "")
 
 

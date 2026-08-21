@@ -25,11 +25,14 @@ Three properties are pinned here, one per defect:
    "xAI run".  An error that names its own provider makes that class of
    misreading impossible.
 
-3. **No bare Python spelling at the boundary.**  Only this module's own
-   deliberate `RuntimeError`/`ValueError` messages pass through verbatim; any
-   other exception type is labelled `Inference provider '<p>' failed:
-   <Type>: <msg>`, so a future shape surprise can never again surface as
-   `'text'`.
+3. **No bare Python spelling at the boundary.**  Only an `InferenceError` —
+   the module's own class, raised at every site that has something to say —
+   passes through verbatim; everything else is labelled `Inference provider
+   '<p>' failed: <Type>: <msg>`, so a future shape surprise can never again
+   surface as `'text'`.  The rule was originally "a plain `RuntimeError` or
+   `ValueError`, by exact type", which the PR review refuted: those are the
+   types an unforeseen transport failure raises too, so `RuntimeError("boom")`
+   from below claimed the verbatim channel and reached the user as `boom`.
 
 The headline cells run END TO END — a real Vera program through `execute()`
 with `urllib.request.urlopen` mocked — because that is the path the maintainer
@@ -48,7 +51,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vera.codegen import execute
-from vera.runtime.inference import _PROVIDERS, _call_inference_provider
+from vera.runtime.inference import (
+    _PROVIDERS,
+    _call_inference_provider,
+    InferenceError,
+)
 
 from tests.codegen_helpers import _compile_ok
 
@@ -105,8 +112,15 @@ def _http_error(code: int, body: str, *, url: str = "https://example.invalid") -
     )
 
 
+def _anthropic_body_with(extra: dict[str, Any], *blocks: dict[str, Any]) -> str:
+    """An Anthropic response carrying *extra* top-level fields."""
+    return json.dumps(
+        {"id": "msg_1", "type": "message", "content": list(blocks), **extra},
+    )
+
+
 def _anthropic_body(*blocks: dict[str, Any]) -> str:
-    return json.dumps({"id": "msg_1", "type": "message", "content": list(blocks)})
+    return _anthropic_body_with({}, *blocks)
 
 
 def _openai_body(content: Any) -> str:
@@ -202,7 +216,7 @@ class TestAnthropicContentBlocks1333:
     def test_no_text_block_names_provider_model_and_block_types(self) -> None:
         """A text-free response is an error that says whose it was."""
         body = _anthropic_body({"type": "thinking", "thinking": "..."})
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("anthropic", body)
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -210,6 +224,52 @@ class TestAnthropicContentBlocks1333:
         assert "thinking" in message
         # Not the bare Python key that #1333 reported.
         assert message != "'text'"
+
+    def test_no_text_block_reports_stop_reason_when_present(self) -> None:
+        """`stop_reason` separates a truncated reply from a silent model.
+
+        A thinking-only reply that exhausts the request's token budget —
+        the runtime pins `max_tokens` at 1024 — is the likeliest producer
+        of a text-free response, and it is a budget problem rather than a
+        malformed provider.  Without the field the message reads the same
+        either way and the reader cannot tell which they have.
+        """
+        body = _anthropic_body_with(
+            {"stop_reason": "max_tokens"},
+            {"type": "thinking", "thinking": "..."},
+        )
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", body)
+        message = str(excinfo.value)
+        assert "stop_reason=max_tokens" in message
+        # Alongside, not instead of, everything the message already carried.
+        assert "anthropic" in message
+        assert "claude-opus-5" in message
+        assert "thinking" in message
+
+    def test_no_text_block_omits_stop_reason_when_absent(self) -> None:
+        """A provider that sends no `stop_reason` gets a clean message.
+
+        The paired negative: an unconditional clause would render
+        `stop_reason=None`, which reads as a value the provider sent.
+        """
+        body = _anthropic_body({"type": "thinking", "thinking": "..."})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", body)
+        message = str(excinfo.value)
+        assert "stop_reason" not in message
+        assert message.endswith("(content block types: thinking).")
+
+    def test_stop_reason_rides_the_end_to_end_err(self) -> None:
+        """The clause reaches the Vera-level `Err`, not just the helper."""
+        body = _anthropic_body_with(
+            {"stop_reason": "max_tokens"},
+            {"type": "thinking", "thinking": "..."},
+        )
+        value, stdout = _run_with_transport(body)
+        assert value == 1
+        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        assert "stop_reason=max_tokens" in stdout
 
     def test_no_text_block_reports_the_model_actually_used(self) -> None:
         """`VERA_INFERENCE_MODEL`'s value, not the registry default, is named.
@@ -443,56 +503,67 @@ class TestInferenceBoundaryEndToEnd1333:
         assert "401" in stdout
         assert "invalid x-api-key" in stdout
 
-    def test_unforeseen_exception_is_labelled_with_its_type(self) -> None:
-        """THE BOUNDARY GUARD: a `KeyError` can never again print as `'text'`.
+    #: Exception types that must NOT reach the user as their own bare
+    #: message.  `RuntimeError` and `ValueError` are the load-bearing pair:
+    #: the boundary used to test for exactly those two, so each of them
+    #: claimed the verbatim channel while carrying a message written for
+    #: nobody.  `JSONDecodeError` is the third because it is a `ValueError`
+    #: SUBCLASS, which is what made the exact-type test necessary before a
+    #: dedicated class made the question moot.
+    _UNFORESEEN = (
+        (RuntimeError("boom"), "RuntimeError", "boom"),
+        (ValueError("boom"), "ValueError", "boom"),
+        (KeyError("text"), "KeyError", "'text'"),
+        (
+            json.JSONDecodeError("Expecting value", "<html>", 0),
+            "JSONDecodeError",
+            "Expecting value",
+        ),
+    )
 
-        `_call_inference_provider` is patched to raise the exact exception
-        the by-position parse used to raise, so this cell measures the
-        boundary's formatting rather than the parse that no longer fails.
+    @pytest.mark.parametrize(
+        ("exc", "type_name", "fragment"),
+        _UNFORESEEN,
+        ids=[row[1] for row in _UNFORESEEN],
+    )
+    def test_unforeseen_exception_is_labelled_with_its_type(
+        self, exc: BaseException, type_name: str, fragment: str,
+    ) -> None:
+        """Anything that is not an `InferenceError` is labelled, whatever its type.
+
+        THE PR-REVIEW FINDING, in the `RuntimeError`/`ValueError` rows: the
+        boundary's old rule handed the verbatim channel to those two types
+        by name, so a `RuntimeError("boom")` raised anywhere below us — the
+        transport, a dependency, a future edit — surfaced as the single word
+        `boom`.  That is #1333's own defect one level up, and it is why the
+        rule is now a dedicated class nothing else can raise by accident.
+
+        `_call_inference_provider` is patched rather than driven through a
+        response shape, so this measures the boundary's formatting and not a
+        parse that no longer fails.
         """
         result = _compile_ok(_CLASSIFY_SOURCE)
         with patch(
-            "vera.runtime.inference._call_inference_provider",
-            side_effect=KeyError("text"),
-        ):
-            exec_result = execute(
-                result, env_vars={"VERA_ANTHROPIC_API_KEY": "sk-ant-test"},
-            )
-        assert exec_result.value == 1
-        assert exec_result.stdout != "'text'"
-        assert exec_result.stdout == (
-            "Inference provider 'anthropic' failed: KeyError: 'text'"
-        )
-
-    def test_value_error_subclass_is_labelled_not_passed_through(self) -> None:
-        """The pass-through is by EXACT type, so a subclass cannot claim it.
-
-        `json.JSONDecodeError` IS a `ValueError`, so an `isinstance` test at
-        the boundary would publish `Expecting value: line 1 column 1
-        (char 0)` as the entire Err string — the same class of bare Python
-        spelling as `'text'`.  The parse already converts that particular
-        failure into a named message at source, so only this cell measures
-        the boundary rule itself.
-        """
-        result = _compile_ok(_CLASSIFY_SOURCE)
-        with patch(
-            "vera.runtime.inference._call_inference_provider",
-            side_effect=json.JSONDecodeError("Expecting value", "<html>", 0),
+            "vera.runtime.inference._call_inference_provider", side_effect=exc,
         ):
             exec_result = execute(
                 result, env_vars={"VERA_ANTHROPIC_API_KEY": "sk-ant-test"},
             )
         assert exec_result.value == 1
         assert exec_result.stdout.startswith(
-            "Inference provider 'anthropic' failed: JSONDecodeError: "
+            f"Inference provider 'anthropic' failed: {type_name}: "
         )
+        assert fragment in exec_result.stdout
+        # The whole point: the exception's own spelling is never the whole
+        # message.  `!= fragment` is the assertion the old rule failed.
+        assert exec_result.stdout != fragment
 
-    def test_deliberate_runtime_error_passes_through_verbatim(self) -> None:
-        """This module's own Vera-native messages are not re-labelled."""
+    def test_deliberate_inference_error_passes_through_verbatim(self) -> None:
+        """An `InferenceError` is a message written for a user — unlabelled."""
         result = _compile_ok(_CLASSIFY_SOURCE)
         with patch(
             "vera.runtime.inference._call_inference_provider",
-            side_effect=RuntimeError("Inference provider 'anthropic' (m) says so."),
+            side_effect=InferenceError("Inference provider 'anthropic' (m) says so."),
         ):
             exec_result = execute(
                 result, env_vars={"VERA_ANTHROPIC_API_KEY": "sk-ant-test"},
@@ -500,8 +571,20 @@ class TestInferenceBoundaryEndToEnd1333:
         assert exec_result.value == 1
         assert exec_result.stdout == "Inference provider 'anthropic' (m) says so."
 
-    def test_unknown_provider_value_error_passes_through_verbatim(self) -> None:
-        """The registry's own `ValueError` keeps its wording and its list."""
+    def test_inference_error_is_a_runtime_error_but_not_a_value_error(self) -> None:
+        """The class's shape, pinned where the reasoning for it lives.
+
+        `RuntimeError` keeps `except RuntimeError` callers working.  NOT
+        also `ValueError`, deliberately: this module wraps `json.loads` in
+        `except ValueError` twice, and a subclass of both would let a future
+        edit that moved a deliberate raise inside one of those blocks be
+        swallowed by its own handler, with no test able to see it.
+        """
+        assert issubclass(InferenceError, RuntimeError)
+        assert not issubclass(InferenceError, ValueError)
+
+    def test_unknown_provider_error_passes_through_verbatim(self) -> None:
+        """The registry's own refusal keeps its wording and its list."""
         value, stdout = _run_with_transport(
             _THINKING_FIRST,
             env={

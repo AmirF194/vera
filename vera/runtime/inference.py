@@ -18,6 +18,31 @@ from vera.runtime.heap import (
 from vera.runtime.http import _HTTP_TIMEOUT
 
 
+class InferenceError(RuntimeError):
+    """A failure this module DESCRIBED, rather than one it merely hit.
+
+    Every message raised as an `InferenceError` was written for the
+    person reading a `Result::Err` in a Vera program: it names the
+    provider, the model that answered, and what about the response was
+    wrong.  The host boundary publishes those verbatim and labels
+    everything else with its Python type, so the class is the whole of
+    the distinction between "we have something to say about this" and
+    "something went wrong that we did not anticipate".
+
+    A dedicated class rather than the plain `RuntimeError` / `ValueError`
+    pair the boundary used to test for (#1333 review): those are the
+    types an unforeseen failure deep in the transport raises too, so
+    `RuntimeError("boom")` from anywhere below us claimed the verbatim
+    channel and reached the user as the bare word `boom` — the defect
+    class this family exists to close, one level up.
+
+    `RuntimeError` alone, deliberately not also `ValueError`: this module
+    wraps `json.loads` in `except ValueError` in two places, and a
+    subclass of both would let a future edit that moved a deliberate
+    raise inside one of those blocks be swallowed by its own handler.
+    """
+
+
 @dataclass(frozen=True)
 class _ProviderConfig:
     """Configuration for a single LLM inference provider."""
@@ -133,6 +158,27 @@ def _describe_types(items: list[object]) -> str:
     return ", ".join(seen) or "(none)"
 
 
+def _stop_reason_clause(data: object) -> str:
+    """`; stop_reason=<value>` when the response carries one, else "".
+
+    Appended to the no-text-block message only.  A response that stopped
+    at `max_tokens` with nothing but a thinking block is a budget
+    problem, not a malformed provider; one that stopped at `end_turn`
+    with no text is the provider behaving oddly.  The message cannot
+    tell those apart without this field, and the reader cannot act
+    without knowing which they have.
+
+    Returns "" when the field is absent so a provider that omits it
+    produces a clean message rather than a dangling `stop_reason=None`.
+    """
+    if not isinstance(data, dict):
+        return ""
+    reason = data.get("stop_reason")
+    if reason is None or reason == "":
+        return ""
+    return f"; stop_reason={reason}"
+
+
 def _error_body_detail(raw: bytes) -> str:
     """The provider's own message out of an HTTP error body.
 
@@ -182,7 +228,7 @@ def _call_inference_provider(
     cfg = _PROVIDERS.get(provider)
     if cfg is None:
         valid = ", ".join(sorted(_PROVIDERS))
-        raise ValueError(
+        raise InferenceError(
             f"Unknown inference provider '{provider}'. "
             f"Valid values: {valid}."
         )
@@ -224,7 +270,7 @@ def _call_inference_provider(
             try:
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError as ude:
-                raise RuntimeError(
+                raise InferenceError(
                     f"Inference provider '{provider}' returned a "
                     f"response body that is not valid UTF-8 "
                     f"(invalid byte at position {ude.start}).",
@@ -238,7 +284,7 @@ def _call_inference_provider(
         detail = _error_body_detail(
             http_err.read() if getattr(http_err, "fp", None) is not None else b"",
         )
-        raise RuntimeError(
+        raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) rejected "
             f"the request: HTTP {http_err.code}: {detail}",
         ) from None
@@ -251,7 +297,7 @@ def _call_inference_provider(
         # `json.JSONDecodeError` is a `ValueError` SUBCLASS, and the
         # boundary's pass-through is what keeps this module's own
         # messages verbatim — see `register_inference`.
-        raise RuntimeError(
+        raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) returned a "
             f"response body that is not JSON: {_truncate(decoded)}",
         ) from None
@@ -269,7 +315,7 @@ def _call_inference_provider(
     if cfg.response_style == "anthropic":
         content = data.get("content") if isinstance(data, dict) else None
         if not isinstance(content, list):
-            raise RuntimeError(
+            raise InferenceError(
                 f"Inference provider '{provider}' ({chosen_model}) returned "
                 f"no text block (no 'content' list in the response; "
                 f"response keys: {_describe_keys(data)}).",
@@ -282,10 +328,16 @@ def _call_inference_provider(
             and "text" in block
         ]
         if not texts:
-            raise RuntimeError(
+            # `stop_reason` is what distinguishes "the model chose to say
+            # nothing" from "the reply was cut off before it got to the
+            # text" — a thinking-only response that hits the request's
+            # max_tokens is the likeliest producer of this shape, and the
+            # message should say so rather than leave it to be guessed.
+            raise InferenceError(
                 f"Inference provider '{provider}' ({chosen_model}) returned "
                 f"no text block (content block types: "
-                f"{_describe_types(content)}).",
+                f"{_describe_types(content)}"
+                f"{_stop_reason_clause(data)}).",
             )
         # Joined without a separator: consecutive text blocks are
         # fragments of one message, so concatenation reconstructs
@@ -295,7 +347,7 @@ def _call_inference_provider(
     # openai-style
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
-        raise RuntimeError(
+        raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) returned no "
             f"completion text (no 'choices' list in the response; "
             f"response keys: {_describe_keys(data)}).",
@@ -315,12 +367,12 @@ def _call_inference_provider(
         ]
         if parts:
             return "".join(parts)
-        raise RuntimeError(
+        raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) returned no "
             f"completion text (no text parts in the message content; "
             f"part types: {_describe_types(content)}).",
         )
-    raise RuntimeError(
+    raise InferenceError(
         f"Inference provider '{provider}' ({chosen_model}) returned no "
         f"completion text (message content is {type(content).__name__}; "
         f"message keys: {_describe_keys(message)}).",
@@ -384,14 +436,22 @@ def register_inference(
                 # response parse reached the user as the entire message
                 # `'text'`, naming neither the operation nor the provider.
                 #
-                # EXACT type, not `isinstance`: this module raises plain
-                # `RuntimeError` / `ValueError` for its own deliberate,
-                # Vera-native messages, and every *subclass* of those —
-                # `json.JSONDecodeError` most notably — is by definition a
-                # shape surprise rather than a message written for a user.
-                # An `isinstance` test would re-open the hole for exactly
-                # the class of exception this guard exists to catch.
-                if type(exc) in (RuntimeError, ValueError):
+                # The verbatim channel belongs to `InferenceError` and
+                # nothing else.  Testing for plain `RuntimeError` /
+                # `ValueError` (the #1333 review's finding) let ANY
+                # failure of those types claim it — a `RuntimeError`
+                # raised deep in the transport reached the user as its
+                # own bare message, which is this family's defect one
+                # level up.  A dedicated class cannot be raised by
+                # accident.
+                #
+                # `isinstance` rather than an exact-type test: the hazard
+                # that forced exactness was the stdlib subclassing the
+                # types we checked for (`json.JSONDecodeError` IS a
+                # `ValueError`).  Nothing outside this module subclasses
+                # `InferenceError`, so any subclass is by construction one
+                # of ours and carries a message written for a user.
+                if isinstance(exc, InferenceError):
                     return _alloc_result_err_string(caller, str(exc))
                 return _alloc_result_err_string(
                     caller,
