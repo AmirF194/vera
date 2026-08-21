@@ -1128,6 +1128,78 @@ class TestCredentialRedaction1333:
         assert token not in message
         assert "[redacted]" in message
 
+    #: Every route by which provider-supplied text reaches an `Err`, each
+    #: with the canary key planted in it.  The reported leak was the
+    #: non-JSON 200 body; sweeping the module for message-building sites
+    #: that rendered provider text without redacting found six more, so
+    #: the table IS the invariant — a new message that quotes the
+    #: provider and is not listed here is the next leak.
+    _LEAK_ROUTES: tuple[tuple[str, str, str], ...] = (
+        ("non-JSON 200 body", "anthropic", "<html>proxy said {key}</html>"),
+        ("stop_reason", "anthropic",
+         '{{"content": [{{"type": "thinking"}}], "stop_reason": "{key}"}}'),
+        ("finish_reason", "openai",
+         '{{"choices": [{{"message": {{"content": null}}, '
+         '"finish_reason": "{key}"}}]}}'),
+        ("response key name", "anthropic", '{{"{key}": 1}}'),
+        ("content block type", "anthropic",
+         '{{"content": [{{"type": "{key}"}}]}}'),
+        ("text block keys", "anthropic",
+         '{{"content": [{{"type": "text", "{key}": 1}}]}}'),
+        ("message keys", "openai",
+         '{{"choices": [{{"message": {{"role": "a", "{key}": 1}}}}]}}'),
+        ("refusal", "openai",
+         '{{"choices": [{{"message": {{"content": null, '
+         '"refusal": "{key}"}}}}]}}'),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "provider", "template"),
+        _LEAK_ROUTES,
+        ids=[row[0] for row in _LEAK_ROUTES],
+    )
+    def test_no_route_leaks_the_configured_key(
+        self, label: str, provider: str, template: str,
+    ) -> None:
+        """The invariant: no provider-supplied text reaches an `Err` unredacted.
+
+        Driven through `_call_inference_provider` with the key configured,
+        exactly as a real run has it, so each row measures the production
+        path rather than a helper in isolation.
+        """
+        body = template.format(key=self._KEY)
+        with patch(
+            "urllib.request.urlopen",
+            MagicMock(return_value=_mock_response_bytes(body.encode("utf-8"))),
+        ), pytest.raises(InferenceError) as excinfo:
+            _call_inference_provider(provider, "prompt", "", self._KEY)
+        message = str(excinfo.value)
+        assert self._KEY not in message, f"{label} leaked the configured key"
+        # A prefix is most of what makes a leaked key useful, so the
+        # assertion is not satisfied by clipping the tail off.
+        assert self._KEY[:20] not in message
+        assert "[redacted]" in message
+
+    def test_non_json_success_body_redacts_the_key(self) -> None:
+        """THE REPORTED LEAK, on its own: a 200 whose body is not JSON.
+
+        `_truncate(decoded)` built this message with no redaction at all,
+        so a gateway page echoing the credential put it straight into a
+        Vera value.  Kept as its own cell beside the table because it is
+        the one the review named.
+        """
+        body = f"<html>Bad gateway. Upstream key {self._KEY} rejected.</html>"
+        with patch(
+            "urllib.request.urlopen",
+            MagicMock(return_value=_mock_response_bytes(body.encode("utf-8"))),
+        ), pytest.raises(InferenceError) as excinfo:
+            _call_inference_provider("anthropic", "prompt", "", self._KEY)
+        message = str(excinfo.value)
+        assert self._KEY not in message
+        assert self._KEY[:20] not in message
+        assert "[redacted]" in message
+        assert "not JSON" in message
+
     def test_ordinary_words_are_not_redacted(self) -> None:
         """The paired negative: redaction that eats prose is a different bug.
 
