@@ -52,6 +52,7 @@ import pytest
 
 from vera.codegen import execute
 from vera.runtime.inference import (
+    _ERROR_BODY_CAP,
     _PROVIDERS,
     _call_inference_provider,
     InferenceError,
@@ -494,6 +495,127 @@ class TestHttpRejectionMessages1333:
         message = str(excinfo.value)
         assert len(message) < 500
         assert "500" in message
+
+    def test_error_body_read_is_bounded(self) -> None:
+        """The read asks for a SIZE — the body is never pulled in whole.
+
+        The pre-existing oversized-body cell bounds the MESSAGE, which a
+        bare `read()` satisfies too: it reads megabytes and then truncates
+        to 200 characters. Only the call's argument distinguishes "bounded
+        output" from "bounded memory", so it is asserted directly.
+        """
+        recorded: list[tuple[object, ...]] = []
+        err = _http_error(502, "x" * 100)
+
+        def _recording_read(*args: object) -> bytes:
+            recorded.append(args)
+            return b"x" * 100
+
+        err.read = _recording_read  # type: ignore[method-assign]
+        with pytest.raises(InferenceError):
+            _call_raising("anthropic", err)
+        assert recorded, "the error body was never read at all"
+        assert len(recorded[0]) == 1, (
+            f"read() was called with no size argument ({recorded[0]!r}) — the "
+            f"whole body lands in memory before any truncation"
+        )
+        # One byte past the cap, so an exact-cap body stays distinguishable
+        # from one that overran.
+        assert recorded[0][0] == _ERROR_BODY_CAP + 1
+
+    def test_oversized_error_body_is_bounded_and_marked(self) -> None:
+        """A body past the cap yields a short, marked, still-named message."""
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", _http_error(502, "x" * (_ERROR_BODY_CAP + 1000)))
+        message = str(excinfo.value)
+        assert len(message) < 500
+        assert "(truncated)" in message
+        assert "anthropic" in message
+        assert "claude-opus-5" in message
+        assert "502" in message
+
+    def test_overrun_body_is_never_presented_as_parsed(self) -> None:
+        """An overrun body is reported raw — we do not claim to have parsed it.
+
+        The discriminating shape, and it took finding: a body cut
+        mid-structure is rejected by `json.loads` anyway, so almost any
+        oversized input reaches the raw-text path with or without the
+        overrun branch. Trailing WHITESPACE is the exception — `json.loads`
+        accepts it — so a short envelope padded past the cap is the one
+        input where "we read only part of it" and "we parsed what we read"
+        disagree. Here the message must NOT be surfaced, because we did not
+        see the whole body and cannot know the padding was all there was.
+
+        This is why the branch is written explicitly rather than left to
+        `json.loads` rejecting fragments: that is a property of today's
+        parser, and a later switch to `raw_decode` — which parses a prefix
+        happily — would silently start presenting fragments as complete.
+        """
+        payload = json.dumps({"error": {"message": "invalid x-api-key"}})
+        payload += " " * (_ERROR_BODY_CAP + 500 - len(payload))
+        assert len(payload.encode("utf-8")) > _ERROR_BODY_CAP
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", _http_error(500, payload))
+        message = str(excinfo.value)
+        # The raw text CONTAINS the message — it is the body — so presence
+        # of the phrase proves nothing either way. What separates the two
+        # paths is the envelope: the parsed path yields the bare message,
+        # the raw path yields the JSON around it.
+        assert '{"error"' in message, (
+            "an overrun body was parsed and its message surfaced bare, as "
+            "though the whole body had been read"
+        )
+        assert "(truncated)" in message
+        assert len(message) < 500
+
+    def test_error_body_under_the_cap_is_still_parsed(self) -> None:
+        """The cap does not cost the ordinary case its parsed message.
+
+        Sits just under the boundary rather than at a token size, so a cap
+        applied off-by-one — or applied to the wrong side of the
+        comparison — fails here instead of passing on a tiny body.
+        """
+        filler = "z" * (_ERROR_BODY_CAP - 200)
+        body = json.dumps({"error": {"message": f"invalid x-api-key {filler}"}})
+        assert len(body.encode("utf-8")) < _ERROR_BODY_CAP
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", _http_error(401, body))
+        message = str(excinfo.value)
+        assert "invalid x-api-key" in message
+        assert "(truncated)" in message  # the MESSAGE bound, not the read cap
+
+    def test_missing_body_keeps_the_empty_fallback(self) -> None:
+        """An `HTTPError` carrying no stream reports the documented phrase."""
+        err = _http_error(503, "")
+        err.fp = None  # type: ignore[assignment]
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", err)
+        message = str(excinfo.value)
+        assert "(empty response body)" in message
+        assert "503" in message
+        assert "anthropic" in message
+
+    def test_unreadable_body_still_names_provider_and_code(self) -> None:
+        """A read that RAISES must not cost us the status line.
+
+        Reachable, not hypothetical: a stream already closed under us —
+        which is what a dropped connection looks like at this point —
+        raises `ValueError` from `read`. Losing the detail is a far
+        smaller loss than replacing a described rejection with an
+        unrelated exception.
+        """
+        closed = io.BytesIO(b"never read")
+        closed.close()
+        err = _http_error(502, "")
+        err.fp = closed  # type: ignore[assignment]
+        err.read = closed.read  # type: ignore[method-assign]
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", err)
+        message = str(excinfo.value)
+        assert "(unreadable response body)" in message
+        assert "anthropic" in message
+        assert "claude-opus-5" in message
+        assert "502" in message
 
     def test_non_json_success_body_is_a_named_error(self) -> None:
         """A 200 whose body is not JSON names the provider too.

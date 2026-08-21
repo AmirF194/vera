@@ -7,6 +7,7 @@ provider registry and HTTP call helper, which are used only by this family.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import wasmtime
 
@@ -16,6 +17,9 @@ from vera.runtime.heap import (
     _read_wasm_string,
 )
 from vera.runtime.http import _HTTP_TIMEOUT
+
+if TYPE_CHECKING:  # pragma: no cover — annotations only
+    from urllib.error import HTTPError
 
 
 class InferenceError(RuntimeError):
@@ -116,6 +120,13 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
 #: the useful signal is in its first line, and the Err string is a value
 #: a Vera program may go on to concatenate, print, or match against.
 _ERROR_BODY_CHARS = 200
+
+#: Most of an HTTP error body we will read into memory, in BYTES.  Sized
+#: far above `_ERROR_BODY_CHARS` so a legitimate JSON error envelope
+#: always arrives whole and is parsed, while a hostile or misconfigured
+#: endpoint answering a rejection with megabytes cannot make us hold
+#: them: the message we build out of it is 200 characters either way.
+_ERROR_BODY_CAP = 64 * 1024
 
 
 def _truncate(text: str) -> str:
@@ -245,6 +256,50 @@ def _error_body_detail(raw: bytes) -> str:
     return _truncate(text)
 
 
+def _read_error_body(http_err: HTTPError) -> str:
+    """The provider's error detail, read under a cap and never fatally.
+
+    A bare `http_err.read()` pulls the WHOLE body into memory before
+    `_truncate` ever sees it, so the 200-character bound on the message
+    bounded only what we printed, never what we held.  One byte past the
+    cap is requested so that "the body overran" stays distinguishable
+    from "the body was exactly the cap".
+
+    An overrun body is deliberately NOT parsed.  Today `json.loads`
+    would reject nearly every cut body on its own — the exception is a
+    short envelope padded past the cap with whitespace, which parses
+    cleanly and would surface a message extracted from a body we only
+    partly read.  The rule is therefore stated rather than inherited:
+    having read part of a body, we do not claim to have parsed it.  That
+    also survives a later switch to a prefix-tolerant parser such as
+    `raw_decode`, which would otherwise start presenting fragments as
+    complete with nothing to notice it.  The raw-text path is the honest
+    report, and it is marked as truncated unconditionally: the marker
+    records that the read stopped at the cap, which stays true however
+    short the retained text turns out to be.
+
+    The read itself can fail: a socket already closed raises rather than
+    returning bytes.  Losing the detail is a much smaller loss than
+    losing the provider name and the status code to a second, unrelated
+    exception, so it is guarded and degrades to a stated placeholder.
+    """
+    if getattr(http_err, "fp", None) is None:
+        return "(empty response body)"
+    try:
+        raw = http_err.read(_ERROR_BODY_CAP + 1)
+    except Exception:  # noqa: BLE001 — the detail is optional; the provider and status code are not
+        return "(unreadable response body)"
+    if len(raw) > _ERROR_BODY_CAP:
+        head = raw[:_ERROR_BODY_CAP].decode("utf-8", errors="replace").strip()
+        # Marked unconditionally, because the marker states a fact about
+        # the READ — we stopped at the cap — and not about the length of
+        # whatever survived stripping.  `_truncate` marks on length alone,
+        # so a short envelope padded past the cap with whitespace strips
+        # back under the bound and would be reported as if complete.
+        return head[:_ERROR_BODY_CHARS] + "... (truncated)"
+    return _error_body_detail(raw)
+
+
 def _call_inference_provider(
     provider: str,
     prompt: str,
@@ -317,9 +372,7 @@ def _call_inference_provider(
         # provider that rejected the request nor the reason it gave.
         # The status line is the least useful half of what the API
         # actually sent back.
-        detail = _error_body_detail(
-            http_err.read() if getattr(http_err, "fp", None) is not None else b"",
-        )
+        detail = _read_error_body(http_err)
         raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) rejected "
             f"the request: HTTP {http_err.code}: {detail}",
