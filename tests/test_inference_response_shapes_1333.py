@@ -798,10 +798,40 @@ class TestOpenAiStyleContent1333:
         assert message != "None"
 
     def test_parts_list_without_text_parts_is_a_named_error(self) -> None:
-        body = _openai_body([{"type": "reasoning", "reasoning": "..."}])
+        """The OpenAI half of the no-selected-type rule, in full.
+
+        Spec 9.5.5 promises this `Err` names the part types present AND
+        the provider's reason. Only the types half was asserted, so
+        neutralising `finish` never reddened this cell — the promise held
+        on the Anthropic branch and was untested here.
+        """
+        body = _openai_body_with(
+            [{"type": "reasoning", "reasoning": "..."}],
+            choice={"finish_reason": "length"},
+        )
         with pytest.raises(InferenceError) as excinfo:
             _call("openai", body)
-        assert "reasoning" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "openai" in message
+        assert "gpt-5.6-sol" in message
+        assert "part types: reasoning" in message
+        assert "finish_reason=length" in message
+
+    def test_empty_parts_list_names_no_types_and_the_reason(self) -> None:
+        """`content: []` — no parts at all, as distinct from no CHOICES.
+
+        The empty-list shape had no cell on this branch;
+        `test_empty_choices_is_a_named_error` covers an empty `choices`,
+        which is a different failure one level up.
+        """
+        body = _openai_body_with([], choice={"finish_reason": "content_filter"})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", body)
+        message = str(excinfo.value)
+        assert "openai" in message
+        assert "gpt-5.6-sol" in message
+        assert "part types: (none)" in message
+        assert "finish_reason=content_filter" in message
 
     def test_missing_choices_is_a_named_error(self) -> None:
         body = json.dumps({"error": {"message": "model not found"}})
@@ -1570,6 +1600,11 @@ class TestCredentialRedaction1333:
             "key_ABCDEFGH12345678",
             "token-ABCDEFGH12345678",
             "token_ABCDEFGH12345678",
+            # xAI issues `xai-…`, which no other prefix covers.  Repeated
+            # blocks rather than an alphabet run so the fixture stays
+            # uninteresting to a secret scanner (1.70 bits/character).
+            "xai-abababababababab",
+            "xai_abababababababab",
         ],
     )
     def test_each_documented_prefix_is_redacted(self, token: str) -> None:
@@ -1580,6 +1615,23 @@ class TestCredentialRedaction1333:
         """
         message = self._err_for(f"upstream said: {token}", key="")
         assert token not in message
+        assert "[redacted]" in message
+
+    def test_a_foreign_xai_token_is_redacted(self) -> None:
+        """An `xai-…` token that is NOT the configured key must still go.
+
+        The configured key here is the opaque hex fixture, which shares no
+        characters with the token, so only the PATTERN rule can catch it —
+        the exact-key rule is out of the picture by construction. This is
+        the shape a gateway produces when it echoes a different tenant's
+        credential back in a 401.
+        """
+        token = "xai-abababababababab"
+        message = self._err_for(
+            f"upstream rejected {token}", key=self._OPAQUE_KEY,
+        )
+        assert token not in message
+        assert "xai-" not in message
         assert "[redacted]" in message
 
     #: Every route by which provider-supplied text reaches an `Err`, each
@@ -1824,12 +1876,11 @@ class TestCredentialRedaction1333:
         A pathologically short key redacts incidental text too: with the
         key `a`, `stop_reason=max_tokens` renders as
         `stop_reason=m[redacted]x_tokens`. That is accepted rather than
-        fixed. Every registered provider issues keys of twenty characters
-        or more, so a one-character key cannot authenticate and the
-        cosmetic damage appears only on runs that were already failing —
-        whose Err still carries provider, model and status. A length floor
-        would instead stop redacting short REAL tokens from a self-hosted
-        gateway, trading a cosmetic defect for a security one.
+        fixed: the damage is cosmetic and lands only on an `Err` that
+        still carries provider, model and status, whereas a length floor
+        would stop redacting short REAL tokens, which gateways and
+        proxies do issue. Redaction does not trade coverage for
+        tidiness.
         """
         message = self._err_for("upstream rejected a", key="a")
         assert "[redacted]" in message

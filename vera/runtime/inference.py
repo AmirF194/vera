@@ -163,7 +163,15 @@ def _truncate(text: str) -> str:
 #: quotes the key it rejected ("Incorrect API key provided: sk-ant-…"),
 #: and this module lifts that body into a Vera-level `Result::Err` — a
 #: value the program goes on to print, log, or ship to CI.
-_CREDENTIAL_RE = re.compile(r"(?:sk|key|token)[-_][A-Za-z0-9_-]{8,}")
+#:
+#: `xai` is here because xAI issues `xai-…`, which none of the other
+#: prefixes match; it was uncovered until a review pass caught it.  The
+#: pattern cannot cover every registered provider and is not meant to:
+#: Mistral issues a bare alphanumeric key with no prefix at all, which no
+#: prefix rule could recognise without also redacting ordinary words.
+#: That is precisely why the exact-configured-key rule sits beside this
+#: one — the two are complements, not alternatives.
+_CREDENTIAL_RE = re.compile(r"(?:sk|key|token|xai)[-_][A-Za-z0-9_-]{8,}")
 
 
 def _redact(text: str, api_key: str) -> str:
