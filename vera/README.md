@@ -141,12 +141,12 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | `  assembly.py` | 1,502 | | WAT module assembly, `$alloc`, `$gc_collect` | |
 | `  compilability.py` | 1,004 | | Compilability checks; the two host-import pre-scans (State/Exn families and IO/Markdown/Regex builtins), walking each function's body, its contract predicates and every signature the guard layer will check — including closures', cycle-guarded | |
 | `  wasi.py` | 4,828 | | WASI Preview 2 component/adapter emitter — `--target wasi-p2` / `--world server` (#237, #853) | |
-| `runtime/` | 5,402 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
+| `runtime/` | 5,437 | Execute | wasmtime host layer (#421): traps + per-effect host-binding families | `register_*()`, `WasmTrapError` |
 | `  traps.py` | 493 | | `WasmTrapError`, `_classify_trap` / `_classify_host_error`, source-backtrace resolution | |
 | `  heap.py` | 1,376 | | WASM memory marshalling primitives, ADT/Option/Array/bucket codecs, `_ShadowGuard`, shared collection helpers | |
 | `  collections.py` | 16 | | `_VAL_WASM_TYPES` value-type dispatch table (shared by Map/Set) | |
 | `  text.py` | 34 | | `safe_utf8_decode` — the single lossy-decode site (#592) | |
-| `  <effect>.py` ×14 | 3,053 | | one `register_<effect>(linker, …)` per family: random, math, md, json, regex, html, map, set, decimal, http, async_http (#841 fused-async: worker-thread submit + blocking await + kind-4 cancel/evict decref), inference, state, db | |
+| `  <effect>.py` ×14 | 3,088 | | one `register_<effect>(linker, …)` per family: random, math, md, json, regex, html, map, set, decimal, http, async_http (#841 fused-async: worker-thread submit + blocking await + kind-4 cancel/evict decref), inference, state, db | |
 | `  wasi_host.py` | 213 | | Built-in `wasi-p2` runner via `add_wasip2` — `vera run --target wasi-p2` (#237, #853) | |
 | `  server.py` | 150 | | `vera serve` HTTP driver for `handle(Request -> Response)` (#305) | |
 | `tester.py` | 1,285 | Test | Z3-guided input generation (parameter types resolved through `naming.py`; a TIER-3 target whose input constraints do not all translate is skipped naming the blocker rather than trialled, while a Tier-1-proved function is reported verified and never trialled at all), WASM execution, tier classification | `test()` |
@@ -753,7 +753,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (16
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 12,080 tests across 176 files — compiler-internals unit tests plus a **conformance suite** (244 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 12,086 tests across 176 files — compiler-internals unit tests plus a **conformance suite** (244 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (42 end-to-end demos). The conformance suite is the definitive specification artifact — most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

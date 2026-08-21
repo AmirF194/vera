@@ -90,6 +90,31 @@ public fn main(-> @Int)
 """
 
 
+#: A boundary label wrapping a deliberate message: `… ) failed: <Type>: `.
+_BOUNDARY_LABEL_RE = re.compile(r"\) failed: \w+(?:Error|Exception): ")
+
+
+def _assert_deliberate(text: str, prefix: str) -> None:
+    """*text* is a deliberate message starting with *prefix*, NOT a wrapped one.
+
+    A bare `startswith(prefix)` stopped discriminating the moment the
+    boundary label gained the model.  Under the plain-type mutation the
+    label reads `Inference provider 'anthropic' (claude-opus-5) failed:
+    InferenceError: <the deliberate message>` — which satisfies the
+    prefix check while BEING the regression the cell exists to catch,
+    because the prefix is now a prefix of the label too.  Eleven cells
+    lost their discrimination that way and nothing went red.
+
+    The label's absence is therefore asserted alongside the prefix, and
+    it lives in one helper so the next cell cannot forget it.
+    """
+    assert text.startswith(prefix), f"expected prefix {prefix!r}, got {text!r}"
+    assert not _BOUNDARY_LABEL_RE.search(text), (
+        f"a deliberate message was wrapped in a boundary label, which the "
+        f"prefix check alone cannot see: {text!r}"
+    )
+
+
 def _mock_response_bytes(raw: bytes) -> MagicMock:
     """A transport whose body is raw bytes — for shapes a `str` cannot express."""
     resp = MagicMock()
@@ -410,7 +435,7 @@ class TestAnthropicContentBlocks1333:
         )
         value, stdout = _run_with_transport(body)
         assert value == 1
-        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
         assert "stop_reason=max_tokens" in stdout
 
     def test_no_text_block_reports_the_model_actually_used(self) -> None:
@@ -509,11 +534,39 @@ class TestOpenAiStyleContent1333:
         body = _openai_body([{"type": "output_text", "text": "Positive"}])
         assert _call("openai", body) == "Positive"
 
-    def test_output_text_joins_with_text_parts_in_order(self) -> None:
-        """Both discriminators are accepted in one list, order preserved."""
+    def test_shim_emitting_both_spellings_is_not_doubled(self) -> None:
+        """A gateway mirroring the SAME reply under both spellings.
+
+        Scanning the union of the discriminators concatenated each
+        fragment twice and returned `PositivePositive` — a wrong answer
+        delivered as a success, which is this family's original defect
+        wearing the fix's own clothes. Written with one part of each
+        type carrying identical text, because that is the shim shape;
+        a union bug is invisible when the two texts differ.
+        """
+        body = _openai_body([
+            {"type": "text", "text": "Positive"},
+            {"type": "output_text", "text": "Positive"},
+        ])
+        assert _call("openai", body) == "Positive"
+
+    def test_text_parts_win_over_output_text_parts(self) -> None:
+        """Preference, not union: `text` wins and `output_text` is not read.
+
+        Distinct texts, so the assertion says WHICH spelling was taken
+        rather than merely that the length came out right.
+        """
+        body = _openai_body([
+            {"type": "output_text", "text": "FROM-OUTPUT-TEXT"},
+            {"type": "text", "text": "FROM-TEXT"},
+        ])
+        assert _call("openai", body) == "FROM-TEXT"
+
+    def test_output_text_parts_join_in_order_when_alone(self) -> None:
+        """The fallback still joins its own parts, order preserved."""
         body = _openai_body([
             {"type": "output_text", "text": "Pos"},
-            {"type": "text", "text": "itive"},
+            {"type": "output_text", "text": "itive"},
         ])
         assert _call("openai", body) == "Positive"
 
@@ -863,7 +916,7 @@ class TestInferenceBoundaryEndToEnd1333:
         value, stdout = _run_with_transport(body)
         assert value == 1
         assert stdout != "'text'"
-        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
         assert "thinking" in stdout
 
     def test_non_string_text_block_err_reaches_the_program(self) -> None:
@@ -886,7 +939,7 @@ class TestInferenceBoundaryEndToEnd1333:
         body = json.dumps({"error": {"message": "invalid x-api-key"}})
         value, stdout = _run_with_transport(raises=_http_error(401, body))
         assert value == 1
-        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
         assert "401" in stdout
         assert "invalid x-api-key" in stdout
 
@@ -981,14 +1034,14 @@ class TestInferenceBoundaryEndToEnd1333:
             },
         )
         assert value == 1
-        assert stdout.startswith("Unknown inference provider 'nope'.")
+        _assert_deliberate(stdout, "Unknown inference provider 'nope'.")
 
     def test_json_decode_failure_is_named_not_python_spelled(self) -> None:
         """A `JSONDecodeError` is a `ValueError` *subclass* — it must not
         take the verbatim pass-through an `isinstance` check would grant."""
         value, stdout = _run_with_transport("<html>gateway timeout</html>")
         assert value == 1
-        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
         assert "Expecting value" not in stdout
 
 
@@ -1049,6 +1102,38 @@ class TestMessageBounds1333:
     def test_huge_text_block_type_is_bounded(self) -> None:
         """A single enormous `type` value, not merely many small ones."""
         assert len(self._err(_anthropic_body({"type": self._HUGE}))) < 1000
+
+    def test_leading_whitespace_does_not_eat_the_message(self) -> None:
+        """Bounding must not become deleting.
+
+        The window was sliced from position 0, so its size was an
+        implicit bet on how much leading whitespace a body would carry.
+        900 spaces before real text filled the whole window with
+        whitespace and the value rendered as the empty string — the one
+        part carrying information dropped, for a body a proxy can
+        produce trivially. The window now starts at the first non-space.
+        """
+        from vera.runtime.inference import _truncate
+
+        assert _truncate(" " * 900 + "REAL TEXT") == "REAL TEXT"
+        # Longer than the window itself, so the fix cannot be a bigger window.
+        assert _truncate("\n" * 20_000 + "REAL TEXT") == "REAL TEXT"
+
+    def test_blank_keys_are_not_reported_as_no_keys(self) -> None:
+        """"(no keys)" must mean there were none, not that they printed as none.
+
+        Derived from the rendered string, it stated something false: an
+        object with one key — 900 spaces — was reported as having none.
+        A reader cannot act on a message that denies the thing it is
+        describing.
+        """
+        from vera.runtime.inference import _describe_keys, _describe_types
+
+        assert _describe_keys({" " * 900 + "realkey": 1}) == "realkey"
+        assert _describe_keys({}) == "(no keys)"
+        assert _describe_keys({" " * 900: 1}) == "(keys are blank)"
+        assert _describe_types([]) == "(none)"
+        assert _describe_types([{"type": " " * 900}]) == "(types are blank)"
 
     def test_the_bound_is_the_documented_one(self) -> None:
         """Pinned against the constant, so a widened bound is a decision.
@@ -1200,6 +1285,67 @@ class TestCredentialRedaction1333:
         assert "[redacted]" in message
         assert "not JSON" in message
 
+    #: A configured key the credential PATTERN cannot see: no `sk-`/`key-`/
+    #: `token-` prefix at all.  Every other redaction fixture uses a
+    #: `sk-ant-…` key, which both rules match — so the exact-key rule was
+    #: covered only incidentally, and deleting it left the suite green.
+    #:
+    #: Repeated `deadbeef` rather than an arbitrary hex string, and the
+    #: choice is the scanner's: 32 hex characters drawn evenly measure
+    #: 4.0 bits per character, which is above the 3.5 that Gitleaks'
+    #: `generic-api-key` rule treats as secret-like, and CI flagged the
+    #: previous fixture on exactly that basis.  This value measures
+    #: 2.1556 bits per character over five distinct characters, and reads
+    #: to a human as the placeholder it is.  That is a synthetic key
+    #: chosen to be scanner-neutral, NOT a secret hidden from the
+    #: scanner: no allowlist, no per-line suppression pragma, no
+    #: scanner config.  (Spelled out rather than quoted, because the
+    #: literal directive string suppresses whatever line it appears
+    #: on — writing it here, one line above the fixture, would be the
+    #: very thing this comment disclaims.)
+    _OPAQUE_KEY = "deadbeefdeadbeefdeadbeefdeadbeef"
+
+    def test_the_opaque_fixture_stays_below_the_scanner_threshold(self) -> None:
+        """Keep the fixture uninteresting to a secret scanner, by measurement.
+
+        The constraint is enforced here rather than left to CI, so raising
+        the fixture's entropy fails locally with the reason attached
+        instead of surfacing as a security-job failure two pushes later.
+        """
+        import math
+        from collections import Counter
+
+        counts = Counter(self._OPAQUE_KEY)
+        n = len(self._OPAQUE_KEY)
+        entropy = -sum((c / n) * math.log2(c / n) for c in counts.values())
+        assert entropy < 3.5, (
+            f"the opaque-key fixture measures {entropy:.4f} bits per "
+            f"character, at or above the 3.5 that Gitleaks' "
+            f"generic-api-key rule treats as secret-like"
+        )
+
+    def test_a_key_the_pattern_cannot_match_is_still_redacted(self) -> None:
+        """The exact-key rule, pinned where the pattern cannot stand in.
+
+        Providers issue credentials in shapes the pattern was never
+        written for — a bare hex string here, `xai-…` elsewhere — which
+        is exactly why the configured value is matched literally beside
+        the pattern rather than instead of it.
+        """
+        assert not re.search(r"(?:sk|key|token)[-_]", self._OPAQUE_KEY), (
+            "the fixture key must NOT match the credential pattern, or "
+            "this cell measures the pattern rule again"
+        )
+        message = self._err_for(
+            json.dumps({
+                "error": {"message": f"rejected key {self._OPAQUE_KEY}"},
+            }),
+            key=self._OPAQUE_KEY,
+        )
+        assert self._OPAQUE_KEY not in message
+        assert "[redacted]" in message
+        assert "rejected key" in message
+
     def test_ordinary_words_are_not_redacted(self) -> None:
         """The paired negative: redaction that eats prose is a different bug.
 
@@ -1212,11 +1358,28 @@ class TestCredentialRedaction1333:
         assert "[redacted]" not in message
 
     def test_redaction_precedes_truncation(self) -> None:
-        """A key clipped in half would leave a usable prefix in the message."""
+        """A key clipped by the bound must not leave a usable fragment.
+
+        The fixture puts the key across the 200-character boundary, so
+        under the reversed order (truncate, then redact) only about nine
+        characters of it survive — `sk-ant-ap`. That is too short for the
+        credential pattern's eight-character tail to match, so the
+        fragment sails through unredacted.
+
+        The assertions matter more than the position here. `_KEY not in
+        message` and `_KEY[:20] not in message` were BOTH satisfied by
+        that nine-character leak, which is how this cell passed while
+        testing nothing: reversing the order left it green. The live
+        assertion is that no `sk-` fragment survives at all.
+        """
         body = "x" * (_ERROR_BODY_CHARS - 10) + f" {self._KEY} " + "y" * 500
         message = self._err_for(body)
         assert self._KEY not in message
-        assert self._KEY[:20] not in message
+        assert "sk-" not in message, (
+            "a clipped credential fragment survived — the pattern needs "
+            "eight characters after the prefix, so a short tail escapes "
+            "unless redaction runs first"
+        )
 
 
 # =====================================================================
@@ -1371,7 +1534,7 @@ class TestProviderSweep1333:
             env={"VERA_INFERENCE_PROVIDER": provider, env_key: "sk-test"},
         )
         assert value == 1
-        assert stdout.startswith(f"Inference provider '{provider}' ({model})")
+        _assert_deliberate(stdout, f"Inference provider '{provider}' ({model})")
 
     def test_auto_detect_misattribution_is_self_diagnosing(self) -> None:
         """The sweep's own trap: an exported Anthropic key wins the "xAI run".
@@ -1389,5 +1552,5 @@ class TestProviderSweep1333:
             },
         )
         assert value == 1
-        assert stdout.startswith("Inference provider 'anthropic' (claude-opus-5)")
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
         assert "xai" not in stdout

@@ -136,12 +136,23 @@ def _truncate(text: str) -> str:
     A bounded WINDOW is sliced before stripping.  Every caller feeds this
     values that came from a remote server, and `strip()` on a 64 MB
     `stop_reason` would copy the whole thing in order to discard all but
-    200 characters of it.  The window is four times the bound, so leading
-    whitespace cannot push real text out of view.
+    200 characters of it.
+
+    The window starts at the first non-space character rather than at
+    position 0.  Taking it from the front made "four times the bound" a
+    guess about how much leading whitespace a hostile body would use:
+    900 spaces followed by a sentence filled the whole window with
+    whitespace and rendered as the empty string, losing the only part of
+    the value that carried information — and `_describe_keys` then
+    reported "(no keys)" for an object that had one, which is not a
+    truncated statement but a false one.  Finding the first non-space is
+    linear and copies nothing.
     """
     if len(text) <= _ERROR_BODY_CHARS:
         return text.strip()
-    head = text[: _ERROR_BODY_CHARS * 4].strip()
+    leading = re.match(r"\s*", text)
+    start = leading.end() if leading else 0
+    head = text[start : start + _ERROR_BODY_CHARS * 4].strip()
     if len(head) <= _ERROR_BODY_CHARS:
         return head
     return head[:_ERROR_BODY_CHARS] + "... (truncated)"
@@ -192,7 +203,16 @@ def _describe_keys(value: object, api_key: str = "") -> str:
     too — 3,000 keys is a 20,000-character message otherwise.
     """
     if isinstance(value, dict):
-        return _safe(", ".join(str(k) for k in value), api_key) or "(no keys)"
+        # "(no keys)" is said only when there are none.  Deriving it from
+        # the RENDERED string made it a false statement for an object
+        # whose keys render as nothing — a key of 900 spaces reported an
+        # object with one key as having none.
+        if not value:
+            return "(no keys)"
+        return (
+            _safe(", ".join(str(k) for k in value), api_key)
+            or "(keys are blank)"
+        )
     return f"(not an object: {type(value).__name__})"
 
 
@@ -213,7 +233,11 @@ def _describe_types(items: list[object], api_key: str = "") -> str:
         )
         if kind not in seen:
             seen.append(kind)
-    return _safe(", ".join(seen), api_key) or "(none)"
+    # Same rule as `_describe_keys`: "(none)" means there were none, not
+    # that they rendered as nothing.
+    if not seen:
+        return "(none)"
+    return _safe(", ".join(seen), api_key) or "(types are blank)"
 
 
 def _reason_clause(container: object, field: str, api_key: str = "") -> str:
@@ -587,10 +611,21 @@ def _call_inference_provider(
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = _text_fragments(
-            content, provider, chosen_model, "text part",
-            _OPENAI_TEXT_TYPES, api_key,
-        )
+        # One discriminator at a time, in preference order.  A gateway
+        # that mirrors BOTH spellings of the same reply — the shim shape
+        # — has each fragment twice, and scanning the union concatenated
+        # them into `PositivePositive`: a wrong answer returned as a
+        # success, which is this family's defect once more.  The first
+        # discriminator that yields anything wins, so the other spelling
+        # is never consulted rather than merged.
+        parts: list[str] = []
+        for _discriminator in _OPENAI_TEXT_TYPES:
+            parts = _text_fragments(
+                content, provider, chosen_model, "text part",
+                (_discriminator,), api_key,
+            )
+            if parts:
+                break
         if parts:
             return "".join(parts)
         raise _refusal_or(
