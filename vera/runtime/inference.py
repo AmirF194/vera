@@ -781,8 +781,10 @@ def register_inference(
             _env = env_vars if env_vars is not None else _os.environ
             provider = _env.get("VERA_INFERENCE_PROVIDER", "").lower()
 
-            # Auto-detect provider from whichever key is set,
-            # respecting registry insertion order (anthropic first).
+            # Auto-detect provider from whichever key holds a NON-EMPTY
+            # value — the truthiness test below skips a variable exported
+            # as the empty string, as if it were unset — respecting
+            # registry insertion order (anthropic first).
             if not provider:
                 for _pname, _pcfg in _PROVIDERS.items():
                     if _env.get(_pcfg.env_key, ""):

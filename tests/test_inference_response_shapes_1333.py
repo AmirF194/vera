@@ -2002,7 +2002,7 @@ class TestProviderAndModelNaming1333:
         assert label in exec_result.stdout
 
     def test_boundary_names_the_overriding_model_not_the_default(self) -> None:
-        """`VERA_INFERENCE_MODEL` is what answered, so it is what is named.
+        """`VERA_INFERENCE_MODEL` is the model the request selected, so it is named.
 
         A label hardcoding the registry default would satisfy every cell
         above and be actively misleading on exactly the runs where the
@@ -2085,11 +2085,37 @@ class TestProviderSweep1333:
         assert value == 1
         _assert_deliberate(stdout, f"Inference provider '{provider}' ({model})")
 
+    def test_an_empty_key_is_skipped_by_auto_detect(self) -> None:
+        """A variable exported as "" is skipped, exactly as if unset.
+
+        The loop tests each key for TRUTHINESS, so `export
+        VERA_ANTHROPIC_API_KEY=` leaves anthropic out of the running and
+        the next configured provider wins. Spec 9.5.5 said "whose key is
+        present", which reads as covering the empty string — a shell
+        variable set to "" is present by any ordinary meaning of the
+        word, and this cell is what the corrected wording rests on.
+
+        Asserted through the routed request's own `Err`, so it measures
+        the provider the runtime actually selected rather than a mock's
+        bookkeeping.
+        """
+        value, stdout = _run_with_transport(
+            json.dumps({"unexpected": "shape"}),
+            env={
+                "VERA_ANTHROPIC_API_KEY": "",
+                "VERA_OPENAI_API_KEY": "sk-abababababab",
+            },
+        )
+        assert value == 1
+        _assert_deliberate(stdout, "Inference provider 'openai' (gpt-5.6-sol)")
+        assert "anthropic" not in stdout
+
     def test_auto_detect_misattribution_is_self_diagnosing(self) -> None:
         """The sweep's own trap: an exported Anthropic key wins the "xAI run".
 
         With `VERA_INFERENCE_PROVIDER` unset, auto-detect takes the first
-        configured key in registry insertion order, so a cumulative shell
+        key set to a non-empty value in registry insertion order, so a
+        cumulative shell
         runs anthropic while the operator believes they are testing xAI.
         The Err must name the provider that actually answered.
         """

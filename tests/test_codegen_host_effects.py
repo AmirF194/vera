@@ -991,7 +991,7 @@ class TestInferenceProviderDispatch:
         """When multiple keys are set, _PROVIDERS insertion order determines which wins.
 
         The auto-detection loop scans _PROVIDERS in order and picks the first
-        provider whose key is present in the environment.  With anthropic first
+        provider whose key holds a non-empty value.  With anthropic first
         in the registry, setting both VERA_ANTHROPIC_API_KEY and
         VERA_MOONSHOT_API_KEY must resolve to 'anthropic'.
         """
