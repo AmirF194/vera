@@ -80,13 +80,18 @@ public fn main(-> @Int)
 """
 
 
-def _mock_response(body: str) -> MagicMock:
-    """A minimal stand-in for the object `urlopen` returns."""
+def _mock_response_bytes(raw: bytes) -> MagicMock:
+    """A transport whose body is raw bytes — for shapes a `str` cannot express."""
     resp = MagicMock()
-    resp.read.return_value = body.encode("utf-8")
+    resp.read.return_value = raw
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+def _mock_response(body: str) -> MagicMock:
+    """A minimal stand-in for the object `urlopen` returns."""
+    return _mock_response_bytes(body.encode("utf-8"))
 
 
 def _http_error(code: int, body: str, *, url: str = "https://example.invalid") -> urllib.error.HTTPError:
@@ -370,6 +375,30 @@ class TestHttpRejectionMessages1333:
         assert "anthropic" in message
         assert "claude-opus-5" in message
         assert "Expecting value" not in message
+
+    def test_non_utf8_success_body_is_a_named_error(self) -> None:
+        """A 200 whose body is not valid UTF-8 names the provider and the byte.
+
+        The #591 handler is guarded in `tests/test_runtime_traps.py` by a
+        SOURCE regex, which proves the `except UnicodeDecodeError` block
+        exists but can say nothing about what it produces — and #1333 moved
+        that decode inside a new outer `try` / `except HTTPError`, so the
+        behaviour is pinned here as well.  A strict `.decode("utf-8")`
+        published the raw codec text — byte offsets and Python-internals
+        jargon — as the whole Err string.
+        """
+        # The bad bytes sit mid-body, so the reported position is a real
+        # offset rather than the 0 a truncated or empty body would also give.
+        with patch(
+            "urllib.request.urlopen",
+            MagicMock(return_value=_mock_response_bytes(b"hello \xff\xfe world")),
+        ), pytest.raises(RuntimeError) as excinfo:
+            _call_inference_provider("anthropic", "prompt", "", "sk-test")
+        message = str(excinfo.value)
+        assert "anthropic" in message
+        assert "not valid UTF-8" in message
+        assert "position 6" in message  # len(b"hello ") — the first bad byte
+        assert "codec can't decode" not in message
 
 
 # =====================================================================
