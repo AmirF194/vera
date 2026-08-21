@@ -88,7 +88,7 @@ public fn research_topic(@String -> @Result<String, String>)
 }
 ```
 
-Effects compose. `<Http, Inference>` is the row — both must be permitted. `Inference` auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral, xAI, DeepSeek) from whichever API key is set. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
+Effects compose. `<Http, Inference>` is the row — both must be permitted. `Inference` auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral, xAI, DeepSeek) from whichever API key is set to a non-empty value. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
 
 ```vera
 public fn find_user(@String -> @Result<Array<Array<Option<String>>>, String>)

@@ -363,7 +363,7 @@
 }</pre>
         </div>
         <aside class="aside">
-          <strong>Effects compose.</strong> <code>&lt;Http, Inference&gt;</code> is the row &mdash; both must be permitted. <code>Inference</code> auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral, xAI, DeepSeek) from whichever API key is set. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
+          <strong>Effects compose.</strong> <code>&lt;Http, Inference&gt;</code> is the row &mdash; both must be permitted. <code>Inference</code> auto-detects the provider (Anthropic, OpenAI, Moonshot, Mistral, xAI, DeepSeek) from whichever API key is set to a non-empty value. Postconditions can constrain model output; Z3 cannot know what a model will return at compile time, so these become runtime assertions that trap on violation.
         </aside>
       </div>
 
