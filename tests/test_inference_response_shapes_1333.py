@@ -1894,9 +1894,16 @@ class TestCredentialRedaction1333:
         `token-` needs 8+ opaque characters after it, so an English
         sentence about tokens survives intact.
         """
-        message = self._err_for("the token-based flow needs a key-holder", key="")
+        message = self._err_for(
+            "the token-based flow needs a key-holder from an xai-ish gateway",
+            key="",
+        )
         assert "token-based" in message
         assert "key-holder" in message
+        # `xai` joined the alternation in round 12, so it needs the same
+        # negative: without it, widening the rule would red the two words
+        # above and say nothing about the prefix that was just added.
+        assert "xai-ish" in message
         assert "[redacted]" not in message
 
     def test_redaction_precedes_truncation(self) -> None:
