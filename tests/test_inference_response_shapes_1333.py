@@ -45,6 +45,7 @@ import email.message
 import io
 import json
 import re
+from pathlib import Path
 import urllib.error
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -90,8 +91,15 @@ public fn main(-> @Int)
 """
 
 
-#: A boundary label wrapping a deliberate message: `… ) failed: <Type>: `.
-_BOUNDARY_LABEL_RE = re.compile(r"\) failed: \w+(?:Error|Exception): ")
+#: A boundary label wrapping a deliberate message.  ANCHORED at the start:
+#: the label can only ever be a prefix, whereas the same shape occurring
+#: anywhere in the string is ordinary provider text — a 502 body reading
+#: `upstream (svc) failed: TimeoutError: deadline exceeded` is quoted
+#: verbatim inside a perfectly deliberate message, and an unanchored search
+#: called that a boundary label and failed the cell.
+_BOUNDARY_LABEL_RE = re.compile(
+    r"Inference provider '[^']*' \([^)]*\) failed: \w+(?:Error|Exception): "
+)
 
 
 def _assert_deliberate(text: str, prefix: str) -> None:
@@ -109,7 +117,7 @@ def _assert_deliberate(text: str, prefix: str) -> None:
     it lives in one helper so the next cell cannot forget it.
     """
     assert text.startswith(prefix), f"expected prefix {prefix!r}, got {text!r}"
-    assert not _BOUNDARY_LABEL_RE.search(text), (
+    assert not _BOUNDARY_LABEL_RE.match(text), (
         f"a deliberate message was wrapped in a boundary label, which the "
         f"prefix check alone cannot see: {text!r}"
     )
@@ -445,13 +453,13 @@ class TestAnthropicContentBlocks1333:
         misleading on exactly the runs where the model is the variable.
         """
         body = _anthropic_body({"type": "thinking", "thinking": "..."})
-        with pytest.raises(RuntimeError, match=r"claude-opus-4-6"):
+        with pytest.raises(InferenceError, match=r"claude-opus-4-6"):
             _call("anthropic", body, model="claude-opus-4-6")
 
     def test_content_missing_is_a_named_error(self) -> None:
         """A response with no `content` key fails with the same named shape."""
         body = json.dumps({"type": "error", "error": {"message": "overloaded"}})
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("anthropic", body)
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -461,12 +469,12 @@ class TestAnthropicContentBlocks1333:
     def test_content_not_a_list_is_a_named_error(self) -> None:
         """`content` as a bare string (a shape no provider sends today)."""
         body = json.dumps({"content": "Positive"})
-        with pytest.raises(RuntimeError, match=r"anthropic.*claude-opus-5"):
+        with pytest.raises(InferenceError, match=r"anthropic.*claude-opus-5"):
             _call("anthropic", body)
 
     def test_empty_content_list_is_a_named_error(self) -> None:
         body = _anthropic_body()
-        with pytest.raises(RuntimeError, match=r"anthropic.*claude-opus-5"):
+        with pytest.raises(InferenceError, match=r"anthropic.*claude-opus-5"):
             _call("anthropic", body)
 
 
@@ -580,6 +588,71 @@ class TestOpenAiStyleContent1333:
         with pytest.raises(InferenceError, match=r"no text block"):
             _call("anthropic", body)
 
+    def test_empty_string_completion_stays_ok_without_a_refusal(self) -> None:
+        """An empty completion is a VALUE, and stays one.
+
+        A model may legitimately answer with nothing, and `Ok("")` has
+        been the behaviour since v0.1.12. The review wanted every empty
+        completion routed to an error; that half is declined, because it
+        is a behaviour change with nothing to do with #1333 and it would
+        turn a valid reply into a failure.
+        """
+        assert _call("openai", _openai_body("")) == ""
+        assert _call("openai", _openai_body("   ")) == "   "
+        assert _call("openai", _openai_body([{"type": "text", "text": ""}])) == ""
+
+    def test_empty_string_completion_with_a_refusal_surfaces_the_refusal(self) -> None:
+        """…but an empty completion BESIDE a refusal discards the answer.
+
+        `Ok("")` tells the caller the model said nothing, when in fact it
+        said why it would not. This is the scoped half of the finding: the
+        refusal's presence is what distinguishes the two, not emptiness.
+        """
+        body = _openai_body_with("", message={"refusal": "I can't help with that."})
+        with pytest.raises(InferenceError, match=r"refused the request: I can't help"):
+            _call("openai", body)
+
+    def test_empty_parts_list_with_a_refusal_surfaces_the_refusal(self) -> None:
+        """The list form of the same rule."""
+        body = _openai_body_with(
+            [{"type": "text", "text": ""}],
+            message={"refusal": "I can't help with that."},
+        )
+        with pytest.raises(InferenceError, match=r"refused the request: I can't help"):
+            _call("openai", body)
+
+    def test_empty_text_part_does_not_shadow_a_real_output_text_part(self) -> None:
+        """THE REGRESSION: an empty `text` part hid a real `output_text` one.
+
+        `if parts: break` treated `[""]` as a hit, so the loop stopped on
+        the empty `text` fragment and never read the `output_text` part
+        carrying the answer — `Ok("")` where 8c7a6e5e returned
+        `Ok("Positive")`. Both orders, because the list order is the
+        provider's to choose.
+        """
+        first = _openai_body([
+            {"type": "text", "text": ""},
+            {"type": "output_text", "text": "Positive"},
+        ])
+        second = _openai_body([
+            {"type": "output_text", "text": "Positive"},
+            {"type": "text", "text": ""},
+        ])
+        assert _call("openai", first) == "Positive"
+        assert _call("openai", second) == "Positive"
+
+    def test_all_empty_fragments_remain_an_empty_completion(self) -> None:
+        """The paired negative: nothing to prefer means the answer is "".
+
+        Distinguishes "an empty fragment is not a hit" from "an empty
+        result is an error" — only the first is intended.
+        """
+        body = _openai_body([
+            {"type": "text", "text": ""},
+            {"type": "output_text", "text": ""},
+        ])
+        assert _call("openai", body) == ""
+
     def test_refusal_text_is_surfaced(self) -> None:
         """A refusal turn explains itself instead of describing null content.
 
@@ -634,7 +707,7 @@ class TestOpenAiStyleContent1333:
         completion — a silent wrong answer, not merely a bad message.
         """
         body = _openai_body(None)
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("openai", body)
         message = str(excinfo.value)
         assert "openai" in message
@@ -643,13 +716,13 @@ class TestOpenAiStyleContent1333:
 
     def test_parts_list_without_text_parts_is_a_named_error(self) -> None:
         body = _openai_body([{"type": "reasoning", "reasoning": "..."}])
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("openai", body)
         assert "reasoning" in str(excinfo.value)
 
     def test_missing_choices_is_a_named_error(self) -> None:
         body = json.dumps({"error": {"message": "model not found"}})
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("openai", body)
         message = str(excinfo.value)
         assert "openai" in message
@@ -658,12 +731,12 @@ class TestOpenAiStyleContent1333:
 
     def test_empty_choices_is_a_named_error(self) -> None:
         body = json.dumps({"choices": []})
-        with pytest.raises(RuntimeError, match=r"openai.*gpt-5\.6-sol"):
+        with pytest.raises(InferenceError, match=r"openai.*gpt-5\.6-sol"):
             _call("openai", body)
 
     def test_missing_message_is_a_named_error(self) -> None:
         body = json.dumps({"choices": [{"finish_reason": "length"}]})
-        with pytest.raises(RuntimeError, match=r"openai.*gpt-5\.6-sol"):
+        with pytest.raises(InferenceError, match=r"openai.*gpt-5\.6-sol"):
             _call("openai", body)
 
 
@@ -681,7 +754,7 @@ class TestHttpRejectionMessages1333:
             "type": "error",
             "error": {"type": "authentication_error", "message": "invalid x-api-key"},
         })
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call_raising("anthropic", _http_error(401, body))
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -700,7 +773,7 @@ class TestHttpRejectionMessages1333:
                 "code": "invalid_api_key",
             },
         })
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call_raising("openai", _http_error(401, body))
         message = str(excinfo.value)
         assert "openai" in message
@@ -710,7 +783,7 @@ class TestHttpRejectionMessages1333:
 
     def test_non_json_error_body_falls_back_to_raw_text(self) -> None:
         """An HTML error page from a proxy still yields a named message."""
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call_raising("anthropic", _http_error(502, "<html>Bad Gateway</html>"))
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -719,7 +792,7 @@ class TestHttpRejectionMessages1333:
 
     def test_long_error_body_is_truncated(self) -> None:
         """A megabyte of proxy HTML does not become the Err string."""
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call_raising("anthropic", _http_error(500, "x" * 5000))
         message = str(excinfo.value)
         assert len(message) < 500
@@ -853,7 +926,7 @@ class TestHttpRejectionMessages1333:
         would reach the boundary and — under an `isinstance` pass-through —
         surface as the bare `Expecting value: line 1 column 1 (char 0)`.
         """
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(InferenceError) as excinfo:
             _call("anthropic", "<html>gateway timeout</html>")
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -876,7 +949,7 @@ class TestHttpRejectionMessages1333:
         with patch(
             "urllib.request.urlopen",
             MagicMock(return_value=_mock_response_bytes(b"hello \xff\xfe world")),
-        ), pytest.raises(RuntimeError) as excinfo:
+        ), pytest.raises(InferenceError) as excinfo:
             _call_inference_provider("anthropic", "prompt", "", "sk-test")
         message = str(excinfo.value)
         assert "anthropic" in message
@@ -998,6 +1071,22 @@ class TestInferenceBoundaryEndToEnd1333:
         # The whole point: the exception's own spelling is never the whole
         # message.  `!= fragment` is the assertion the old rule failed.
         assert exec_result.stdout != fragment
+
+    def test_provider_text_quoting_a_failure_is_still_deliberate(self) -> None:
+        """A 502 body may contain the label's own shape — anywhere but the front.
+
+        `upstream (svc) failed: TimeoutError: deadline exceeded` is
+        ordinary provider text, and an UNANCHORED label search called the
+        deliberate message that quotes it a wrapped one, failing a cell
+        for a message that was never wrapped. The label can only be a
+        prefix, so the check is anchored.
+        """
+        body = json.dumps({"error": {"message":
+            "upstream (svc) failed: TimeoutError: deadline exceeded"}})
+        value, stdout = _run_with_transport(raises=_http_error(502, body))
+        assert value == 1
+        assert "failed: TimeoutError: deadline exceeded" in stdout
+        _assert_deliberate(stdout, "Inference provider 'anthropic' (claude-opus-5)")
 
     def test_deliberate_inference_error_passes_through_verbatim(self) -> None:
         """An `InferenceError` is a message written for a user — unlabelled."""
@@ -1135,6 +1224,28 @@ class TestMessageBounds1333:
         assert _describe_types([]) == "(none)"
         assert _describe_types([{"type": " " * 900}]) == "(types are blank)"
 
+    def test_blank_reason_and_body_say_blank(self) -> None:
+        """A present-but-blank value must not render as dangling text.
+
+        A whitespace-only `stop_reason` produced `; stop_reason=).` and a
+        whitespace-only body `is not JSON: ` with nothing after the
+        colon. Present-and-blank is not the same as absent, so the clause
+        stays and says which it was.
+        """
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", _anthropic_body_with(
+                {"stop_reason": "   "}, {"type": "thinking"},
+            ))
+        assert "stop_reason=(blank)" in str(excinfo.value)
+
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", _openai_body_with(None, choice={"finish_reason": "  "}))
+        assert "finish_reason=(blank)" in str(excinfo.value)
+
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", "   ")
+        assert str(excinfo.value).endswith("is not JSON: (blank)")
+
     def test_the_bound_is_the_documented_one(self) -> None:
         """Pinned against the constant, so a widened bound is a decision.
 
@@ -1236,7 +1347,62 @@ class TestCredentialRedaction1333:
         ("refusal", "openai",
          '{{"choices": [{{"message": {{"content": null, '
          '"refusal": "{key}"}}}}]}}'),
+        # The four the sweep missed first time: every one renders provider
+        # text through a helper that takes `api_key`, and dropping the
+        # argument at any of them turned nothing red.
+        ("openai part types", "openai",
+         '{{"choices": [{{"message": {{"content": '
+         '[{{"type": "{key}"}}]}}}}]}}'),
+        ("openai text part keys", "openai",
+         '{{"choices": [{{"message": {{"content": '
+         '[{{"type": "text", "{key}": 1}}]}}}}]}}'),
+        ("choices-level response keys", "openai", '{{"{key}": 1}}'),
+        ("choice keys", "openai", '{{"choices": [{{"{key}": 1}}]}}'),
     )
+
+    #: Helpers that render provider-supplied text and therefore take the
+    #: key.  Listed literally: deriving them from the source would grow to
+    #: match whatever the source does and could never report a new one.
+    _RENDERERS = (
+        "_safe", "_describe_keys", "_describe_types",
+        "_reason_clause", "_missing_or_wrong", "_text_fragments",
+    )
+
+    #: How many call sites hand `api_key` to one of those helpers today,
+    #: measured with the `def` lines excluded (a signature is not a call).
+    #: A literal, so ADDING a render site fails this cell and forces the
+    #: author to decide whether it needs a route row above.
+    _API_KEY_RENDER_SITES = 22
+
+    def test_every_api_key_render_site_is_accounted_for(self) -> None:
+        """A new render site must be classified, not silently uncovered.
+
+        This does NOT prove each site maps to a row — several sites share
+        one route (`_error_body_detail` alone calls `_safe` five times for
+        the single rejection-body route), so a count-equality assertion
+        between sites and rows would be false by construction. What it
+        pins is the thing that actually went wrong: four render sites were
+        added over three rounds and none of them got a row, and nothing
+        failed. Changing the count now fails here, with the route table
+        named in the message.
+        """
+        source = (
+            Path(__file__).resolve().parent.parent
+            / "vera" / "runtime" / "inference.py"
+        ).read_text(encoding="utf-8")
+        # Tolerates one level of nested parens and multi-line calls.
+        sites = sum(
+            len(re.findall(
+                rf"(?<!def )\b{name}\((?:[^()]|\([^()]*\))*api_key", source,
+            ))
+            for name in self._RENDERERS
+        )
+        assert sites == self._API_KEY_RENDER_SITES, (
+            f"{sites} render sites take `api_key`, expected "
+            f"{self._API_KEY_RENDER_SITES}. A site was added or removed: "
+            f"decide whether it needs a row in _LEAK_ROUTES (which has "
+            f"{len(self._LEAK_ROUTES)}), then update this count."
+        )
 
     @pytest.mark.parametrize(
         ("label", "provider", "template"),

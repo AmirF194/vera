@@ -180,6 +180,18 @@ def _redact(text: str, api_key: str) -> str:
     return _CREDENTIAL_RE.sub("[redacted]", text)
 
 
+def _or_blank(rendered: str) -> str:
+    """*rendered*, or `(blank)` when it came out empty.
+
+    A provider-supplied value that is present but renders to nothing —
+    a whitespace-only `stop_reason`, a body of three spaces — is not the
+    same as an absent one, and a message must not imply it was.  Left
+    bare it produced dangling text: `; stop_reason=).` and `is not
+    JSON: ` with nothing after the colon.
+    """
+    return rendered or "(blank)"
+
+
 def _safe(text: str, api_key: str) -> str:
     """Provider-supplied text, made fit for a Vera value: redacted, then bounded.
 
@@ -258,7 +270,10 @@ def _reason_clause(container: object, field: str, api_key: str = "") -> str:
     value = container.get(field)
     if value is None or value == "":
         return ""
-    return f"; {field}={_safe(str(value), api_key)}"
+    # Rendered first: a whitespace-only value is PRESENT, so the clause
+    # stays and says the value was blank, rather than being dropped (which
+    # would read as absent) or left dangling as `; stop_reason=`.
+    return f"; {field}={_or_blank(_safe(str(value), api_key))}"
 
 
 def _missing_or_wrong(
@@ -516,7 +531,8 @@ def _call_inference_provider(
         # messages verbatim — see `register_inference`.
         raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) returned a "
-            f"response body that is not JSON: {_safe(decoded, api_key)}",
+            f"response body that is not JSON: "
+            f"{_or_blank(_safe(decoded, api_key))}",
         ) from None
 
     # #1333 — select the completion by SHAPE, never by position.  The
@@ -607,9 +623,26 @@ def _call_inference_provider(
             f"completion text ({detail}{finish}).",
         )
 
+    def _completion_or_refusal(text: str) -> str:
+        """An empty completion is a VALUE — unless the turn also refused.
+
+        A model may legitimately answer with the empty string, and that
+        has been `Ok("")` since v0.1.12; changing it would be a
+        behaviour change with nothing to do with #1333.  But when the
+        turn carries a `refusal` beside empty content, the refusal is
+        the answer and `Ok("")` discards it — the caller is told the
+        model said nothing when it said why it would not.
+        """
+        if text.strip():
+            return text
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal.strip():
+            raise _refusal_or("the completion was empty")
+        return text
+
     content = message.get("content")
     if isinstance(content, str):
-        return content
+        return _completion_or_refusal(content)
     if isinstance(content, list):
         # One discriminator at a time, in preference order.  A gateway
         # that mirrors BOTH spellings of the same reply — the shim shape
@@ -619,15 +652,32 @@ def _call_inference_provider(
         # discriminator that yields anything wins, so the other spelling
         # is never consulted rather than merged.
         parts: list[str] = []
+        joined = ""
+        # Whether ANY discriminator produced fragments, which `parts`
+        # cannot answer: it holds only the last discriminator's result, so
+        # an empty-fragment hit under `text` was erased by the empty list
+        # under `output_text` and a legitimate `Ok("")` became an error.
+        saw_fragments = False
         for _discriminator in _OPENAI_TEXT_TYPES:
             parts = _text_fragments(
                 content, provider, chosen_model, "text part",
                 (_discriminator,), api_key,
             )
-            if parts:
+            # A hit is a non-empty RESULT, not a non-empty list.  Treating
+            # `[""]` as a hit let an empty `text` part shadow a real
+            # `output_text` one — `[{"type":"text","text":""},
+            # {"type":"output_text","text":"Positive"}]` returned `Ok("")`
+            # in either order, losing the completion the provider sent.
+            saw_fragments = saw_fragments or bool(parts)
+            joined = "".join(parts)
+            if joined:
                 break
-        if parts:
-            return "".join(parts)
+        if joined:
+            return joined
+        if saw_fragments:
+            # Every discriminator yielded only empty fragments.  That is a
+            # genuinely empty completion, not a missing one.
+            return _completion_or_refusal(joined)
         raise _refusal_or(
             f"no text parts in the message content; "
             f"part types: {_describe_types(content, api_key)}"
