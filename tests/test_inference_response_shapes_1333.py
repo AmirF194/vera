@@ -1323,6 +1323,68 @@ class TestEmptyCompletionWithAReason1333:
                            choice={"finish_reason": "stop"}), ""),
     )
 
+    #: The same reasons in spellings a gateway might normalise to.  Every
+    #: registered provider emits these lowercase today, so this is
+    #: hardening rather than a reported failure — but an exact match sent
+    #: `MAX_TOKENS` straight to `Ok("")`, losing the answer over a
+    #: spelling difference.
+    _CASE_VARIANTS = (
+        ("anthropic MAX_TOKENS", "anthropic",
+         _anthropic_body_with({"stop_reason": "MAX_TOKENS"},
+                              {"type": "text", "text": ""}),
+         "stop_reason=MAX_TOKENS"),
+        ("anthropic Refusal", "anthropic",
+         _anthropic_body_with({"stop_reason": "Refusal"},
+                              {"type": "text", "text": ""}),
+         "stop_reason=Refusal"),
+        ("openai Length", "openai",
+         _openai_body_with("", choice={"finish_reason": "Length"}),
+         "finish_reason=Length"),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "provider", "body", "token"),
+        _CASE_VARIANTS,
+        ids=[row[0] for row in _CASE_VARIANTS],
+    )
+    def test_the_reason_is_matched_case_insensitively(
+        self, label: str, provider: str, body: str, token: str,
+    ) -> None:
+        """The comparison folds case; the rendered token does not.
+
+        Both halves matter. Folding only the comparison keeps the
+        diagnostic honest about what the provider actually sent, which is
+        the whole point of quoting the token — a consumer grepping for
+        `max_tokens` should not be told the provider said that when it
+        said `MAX_TOKENS`.
+        """
+        with pytest.raises(InferenceError) as excinfo:
+            _call(provider, body)
+        message = str(excinfo.value)
+        assert "returned an empty completion" in message
+        assert token in message, (
+            f"the token must be rendered as received, not normalised: "
+            f"expected {token!r} in {message!r}"
+        )
+
+    def test_case_folding_does_not_widen_the_reason_set(self) -> None:
+        """The paired negative: folding case must not admit other reasons.
+
+        `End_Turn` and `Stop` differ from the failing set in more than
+        case, so they stay `Ok("")` — otherwise "case-insensitive" would
+        have quietly become "any reason at all".
+        """
+        assert _call("anthropic", _anthropic_body_with(
+            {"stop_reason": "End_Turn"}, {"type": "text", "text": ""},
+        )) == ""
+        assert _call("openai", _openai_body_with(
+            "", choice={"finish_reason": "Stop"},
+        )) == ""
+        # And a non-empty reply under a folded failing reason is untouched.
+        assert _call("anthropic", _anthropic_body_with(
+            {"stop_reason": "MAX_TOKENS"}, {"type": "text", "text": "Yes"},
+        )) == "Yes"
+
     @pytest.mark.parametrize(
         ("label", "provider", "body", "expected"),
         _UNCHANGED,
@@ -1587,15 +1649,18 @@ class TestCredentialRedaction1333:
         that went wrong — four render sites were added over three rounds,
         none got a row, and nothing failed.
 
-        Counted by parsing the module rather than by regex. The pattern
-        this replaced nested a quantifier inside a repeated group, which
-        backtracks badly on a long call that never matches; our own source
-        is the input, so the cost was a slow gate rather than a
-        vulnerability. It was also WRONG — it read 22 where the true count
-        was 23, missing a positional `api_key` in a call spread over
-        enough lines. The walk reads each renderer's own signature for the
-        parameter's position, so positional and keyword sites both count
-        and a `def` line is a signature rather than a call by
+        Counted by parsing the module rather than by regex, because the
+        regex was WRONG: it read 22 where the true count was 23, missing a
+        positional `api_key` in a call spread over enough lines, so the
+        tripwire was weaker than it advertised. Its cost was not the
+        problem — review raised catastrophic backtracking, and that does
+        not apply here: the alternation's two branches are
+        first-character disjoint, so the star is unambiguous, and an
+        independent reviewer measured it linear across nine adversarial
+        shapes from n=1,000 to n=16,000 (×14.7-16.1 per ×16 of input,
+        worst case 3.64 ms). The walk reads each renderer's own signature
+        for the parameter's position, so positional and keyword sites both
+        count and a `def` line is a signature rather than a call by
         construction.
         """
         source = (

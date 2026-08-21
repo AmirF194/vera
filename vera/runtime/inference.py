@@ -310,7 +310,16 @@ def _empty_completion_error(
     if text.strip():
         return None
     reason = container.get(field) if isinstance(container, dict) else None
-    if not isinstance(reason, str) or reason not in _EMPTY_COMPLETION_FAILURES:
+    # Case-insensitive on the COMPARISON only: every registered provider
+    # emits these lowercase today, but the value is a wire field and a
+    # gateway is free to normalise it differently — `MAX_TOKENS` falling
+    # through to `Ok("")` would lose the answer for a spelling difference.
+    # The token is still rendered exactly as received, so the diagnostic
+    # reports what the provider actually sent.
+    if (
+        not isinstance(reason, str)
+        or reason.lower() not in _EMPTY_COMPLETION_FAILURES
+    ):
         return None
     return InferenceError(
         f"Inference provider '{provider}' ({model}) returned an empty "
