@@ -44,6 +44,7 @@ from __future__ import annotations
 import email.message
 import io
 import json
+import re
 import urllib.error
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -53,6 +54,7 @@ import pytest
 from vera.codegen import execute
 from vera.runtime.inference import (
     _ERROR_BODY_CAP,
+    _ERROR_BODY_CHARS,
     _PROVIDERS,
     _call_inference_provider,
     InferenceError,
@@ -124,8 +126,19 @@ def _anthropic_body(*blocks: dict[str, Any]) -> str:
     return _anthropic_body_with({}, *blocks)
 
 
+def _openai_body_with(
+    content: Any, *, message: dict[str, Any] | None = None,
+    choice: dict[str, Any] | None = None, omit_content: bool = False,
+) -> str:
+    """An OpenAI-style response with extra `message` / `choice` fields."""
+    msg: dict[str, Any] = {"role": "assistant", **(message or {})}
+    if not omit_content:
+        msg["content"] = content
+    return json.dumps({"id": "c1", "choices": [{"message": msg, **(choice or {})}]})
+
+
 def _openai_body(content: Any) -> str:
-    return json.dumps({"id": "c1", "choices": [{"message": {"role": "assistant", "content": content}}]})
+    return _openai_body_with(content)
 
 
 #: The thinking-block-first shape that broke the example.  The text block
@@ -142,9 +155,16 @@ def _call(provider: str, body: str, model: str = "") -> str:
         return _call_inference_provider(provider, "prompt", model, "sk-test")
 
 
-def _call_raising(provider: str, exc: BaseException, model: str = "") -> str:
+def _call_raising(
+    provider: str, exc: BaseException, model: str = "", key: str = "sk-test",
+) -> str:
+    """Drive the provider call over a transport that raises *exc*.
+
+    *key* is the configured credential, which the redaction cells vary:
+    the exact-match rule and the pattern rule have to be separable.
+    """
     with patch("urllib.request.urlopen", MagicMock(side_effect=exc)):
-        return _call_inference_provider(provider, "prompt", model, "sk-test")
+        return _call_inference_provider(provider, "prompt", model, key)
 
 
 def _run_with_transport(
@@ -263,6 +283,76 @@ class TestAnthropicContentBlocks1333:
             {"type": "text", "text": "Positive"},
         )
         with pytest.raises(InferenceError, match=r"whose text is NoneType"):
+            _call("anthropic", body)
+
+    def test_text_block_with_no_text_key_is_refused(self) -> None:
+        """THE CONSISTENCY FIX: a key-less text block refuses like a null one.
+
+        It was SKIPPED, which made two malformed shapes behave differently
+        for no reason a caller could see — `{"text": null}` refused while
+        `{}` fell through to whatever came next. Both are a provider
+        failing to fill in a block it typed as text.
+        """
+        body = _anthropic_body({"type": "text"})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", body)
+        message = str(excinfo.value)
+        assert "with no 'text' field" in message
+        assert "anthropic" in message
+        assert "claude-opus-5" in message
+
+    def test_key_less_text_block_refuses_even_before_a_good_one(self) -> None:
+        """THE REPORTED SHAPE: `[{"type":"text"}, {"type":"text","text":"P"}]`.
+
+        This returned `Ok('Positive')` — the malformed block silently
+        dropped and the response reported as whole. It is the exact
+        counterpart of the null-text pair, which refused, and the two now
+        agree.
+        """
+        body = _anthropic_body(
+            {"type": "text"}, {"type": "text", "text": "Positive"},
+        )
+        with pytest.raises(InferenceError, match=r"with no 'text' field"):
+            _call("anthropic", body)
+
+    def test_key_less_text_block_refuses_after_a_good_one(self) -> None:
+        """The mirror: a good block first does not license a broken one after."""
+        body = _anthropic_body(
+            {"type": "text", "text": "Neg"}, {"type": "text"},
+        )
+        with pytest.raises(InferenceError, match=r"with no 'text' field"):
+            _call("anthropic", body)
+
+    def test_content_wrong_type_says_so_instead_of_absent(self) -> None:
+        """`{"content": "Positive"}` no longer contradicts itself.
+
+        It read "no 'content' list in the response; response keys:
+        content" — naming, as a key it had, the key it had just called
+        missing. Absent and present-but-wrong-typed are different faults.
+        """
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", json.dumps({"content": "Positive"}))
+        message = str(excinfo.value)
+        assert "'content' is str, not a list" in message
+        assert "no 'content'" not in message
+
+    def test_content_absent_still_reports_absent(self) -> None:
+        """The paired positive: a genuinely missing key still reads as missing."""
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", json.dumps({"stop_reason": "end_turn"}))
+        message = str(excinfo.value)
+        assert "no 'content' list in the response" in message
+        assert "response keys: stop_reason" in message
+
+    def test_stop_reason_reported_on_the_content_shape_branch_too(self) -> None:
+        """`{"content": null, "stop_reason": "end_turn"}` kept its stop_reason.
+
+        The clause was on the no-text-block branch only, so the shape
+        failure that most needs explaining dropped the one field that
+        explained it.
+        """
+        body = json.dumps({"content": None, "stop_reason": "end_turn"})
+        with pytest.raises(InferenceError, match=r"stop_reason=end_turn"):
             _call("anthropic", body)
 
     def test_no_text_block_names_provider_model_and_block_types(self) -> None:
@@ -397,6 +487,92 @@ class TestOpenAiStyleContent1333:
         assert "openai" in message
         assert "gpt-5.6-sol" in message
         assert f"whose text is {type_name}, not a string" in message
+
+    def test_text_part_with_no_text_key_is_refused(self) -> None:
+        """The parts list gets the same consistency fix as the blocks."""
+        body = _openai_body([
+            {"type": "text", "text": "A"},
+            {"type": "text"},
+            {"type": "text", "text": "B"},
+        ])
+        with pytest.raises(InferenceError, match=r"text part with no 'text' field"):
+            _call("openai", body)
+
+    def test_output_text_is_accepted_as_a_part_discriminator(self) -> None:
+        """Responses-API-shaped gateways spell a text part `output_text`.
+
+        They worked on v0.1.12 because the old code read `content`
+        positionally and never looked at `type` at all; selecting by type
+        alone regressed them, which is a regression this PR introduced
+        rather than one it inherited.
+        """
+        body = _openai_body([{"type": "output_text", "text": "Positive"}])
+        assert _call("openai", body) == "Positive"
+
+    def test_output_text_joins_with_text_parts_in_order(self) -> None:
+        """Both discriminators are accepted in one list, order preserved."""
+        body = _openai_body([
+            {"type": "output_text", "text": "Pos"},
+            {"type": "text", "text": "itive"},
+        ])
+        assert _call("openai", body) == "Positive"
+
+    def test_output_text_is_not_accepted_on_the_anthropic_branch(self) -> None:
+        """Scoped deliberately: the Messages API has no `output_text` block.
+
+        Accepting it there would invent a shape the provider does not
+        send, and mask a genuinely malformed response.
+        """
+        body = _anthropic_body({"type": "output_text", "text": "Positive"})
+        with pytest.raises(InferenceError, match=r"no text block"):
+            _call("anthropic", body)
+
+    def test_refusal_text_is_surfaced(self) -> None:
+        """A refusal turn explains itself instead of describing null content.
+
+        `message.refusal` is the answer; the shape of the empty `content`
+        beside it is the symptom.
+        """
+        body = _openai_body_with(None, message={"refusal": "I can't help with that."})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", body)
+        message = str(excinfo.value)
+        assert "refused the request: I can't help with that." in message
+        assert "openai" in message
+        assert "gpt-5.6-sol" in message
+
+    def test_refusal_is_truncated_and_redacted(self) -> None:
+        """Refusal text is provider-supplied like any other — bounded, cleaned."""
+        body = _openai_body_with(
+            None,
+            message={"refusal": "no: sk-live-SECRETKEY123456 " + "q" * 5000},
+        )
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", body)
+        message = str(excinfo.value)
+        assert len(message) < 500
+        assert "sk-live-SECRETKEY123456" not in message
+        assert "[redacted]" in message
+
+    def test_missing_message_names_the_choice_not_the_response(self) -> None:
+        """`{"choices":[{"finish_reason":"length"}]}` reads coherently now.
+
+        It said "message content is NoneType; message keys: (not an
+        object: NoneType)" — describing a message that was not there at
+        all, and listing the keys of nothing.
+        """
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", json.dumps({"choices": [{"finish_reason": "length"}]}))
+        message = str(excinfo.value)
+        assert "no 'message' object in the choice" in message
+        assert "choice keys: finish_reason" in message
+        assert "(not an object: NoneType)" not in message
+
+    def test_finish_reason_is_reported(self) -> None:
+        """The OpenAI-style analogue of `stop_reason`, read off the choice."""
+        body = _openai_body_with(None, choice={"finish_reason": "length"})
+        with pytest.raises(InferenceError, match=r"finish_reason=length"):
+            _call("openai", body)
 
     def test_null_content_is_a_named_error(self) -> None:
         """A reasoning/tool-call turn with `content: null`.
@@ -762,7 +938,8 @@ class TestInferenceBoundaryEndToEnd1333:
             )
         assert exec_result.value == 1
         assert exec_result.stdout.startswith(
-            f"Inference provider 'anthropic' failed: {type_name}: "
+            f"Inference provider 'anthropic' (claude-opus-5) failed: "
+            f"{type_name}: "
         )
         assert fragment in exec_result.stdout
         # The whole point: the exception's own spelling is never the whole
@@ -818,6 +995,247 @@ class TestInferenceBoundaryEndToEnd1333:
 # =====================================================================
 # 5. The provider sweep, as a regression
 # =====================================================================
+
+
+# =====================================================================
+# Every message is bounded, whatever the provider sends
+# =====================================================================
+
+
+class TestMessageBounds1333:
+    """No provider-supplied value reaches a Vera `Err` at its own size.
+
+    The 200-character bound lived on the error-BODY path only. Every
+    field interpolated into a shape message — `stop_reason`, the block
+    types, the response keys — bypassed it, so a 64 MB `stop_reason`
+    produced a 67 MB `Err` string: a value the Vera program then holds,
+    prints and may concatenate.
+    """
+
+    #: Deliberately megabytes rather than kilobytes. A bound that clips
+    #: at some larger figure would pass a 20,000-character assertion.
+    _HUGE = "z" * (4 * 1024 * 1024)
+
+    def _err(self, body: str) -> str:
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", body)
+        return str(excinfo.value)
+
+    def test_huge_stop_reason_is_bounded(self) -> None:
+        message = self._err(
+            _anthropic_body_with(
+                {"stop_reason": self._HUGE}, {"type": "thinking"},
+            ),
+        )
+        assert len(message) < 1000
+        assert "stop_reason=zzz" in message
+        assert "(truncated)" in message
+
+    def test_huge_finish_reason_is_bounded(self) -> None:
+        body = _openai_body_with(None, choice={"finish_reason": self._HUGE})
+        with pytest.raises(InferenceError) as excinfo:
+            _call("openai", body)
+        assert len(str(excinfo.value)) < 1000
+
+    def test_many_block_types_are_bounded(self) -> None:
+        """3,000 distinct types was a ~20,000-character message."""
+        blocks = [{"type": f"kind{i}"} for i in range(3000)]
+        assert len(self._err(_anthropic_body(*blocks))) < 1000
+
+    def test_many_response_keys_are_bounded(self) -> None:
+        """The key list is attacker-shaped too."""
+        assert len(self._err(json.dumps({f"k{i}": 1 for i in range(3000)}))) < 1000
+
+    def test_huge_text_block_type_is_bounded(self) -> None:
+        """A single enormous `type` value, not merely many small ones."""
+        assert len(self._err(_anthropic_body({"type": self._HUGE}))) < 1000
+
+    def test_the_bound_is_the_documented_one(self) -> None:
+        """Pinned against the constant, so a widened bound is a decision.
+
+        Each cell above allows 1000 characters — envelope plus detail —
+        rather than the raw constant, so this cell keeps the real figure
+        honest instead of letting the slack absorb a regression.
+        """
+        assert _ERROR_BODY_CHARS == 200
+
+
+# =====================================================================
+# Credentials never reach a Vera value
+# =====================================================================
+
+
+class TestCredentialRedaction1333:
+    """A provider's 401 body quotes the key it rejected.
+
+    `Incorrect API key provided: sk-ant-…` is what OpenAI-style providers
+    actually return, and this module lifts that body into a
+    `Result::Err` — which the program prints, logs, or ships to CI. The
+    fix that surfaced the provider's own message is what created the
+    exposure, so the redaction ships with it.
+    """
+
+    _KEY = "sk-ant-api03-REALKEYVALUE1234567890"
+
+    def _err_for(self, body: str, key: str = _KEY) -> str:
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", _http_error(401, body), key=key)
+        return str(excinfo.value)
+
+    def test_the_configured_key_is_redacted(self) -> None:
+        message = self._err_for(json.dumps({
+            "error": {"message": f"Incorrect API key provided: {self._KEY}."},
+        }))
+        assert self._KEY not in message
+        assert "[redacted]" in message
+        # The rest of the message survives — redaction, not suppression.
+        assert "Incorrect API key provided" in message
+        assert "401" in message
+        assert "anthropic" in message
+
+    def test_a_credential_shaped_token_we_never_configured_is_redacted(self) -> None:
+        """A proxy quoting ANOTHER tenant's key is still a leak.
+
+        The exact-match rule cannot see this one, which is why the
+        pattern exists beside it rather than instead of it.
+        """
+        other = "sk-proj-SOMEONEELSESKEY99887766"
+        message = self._err_for(
+            json.dumps({"error": {"message": f"rejected upstream key {other}"}}),
+            key="sk-ant-unrelated-value-here",
+        )
+        assert other not in message
+        assert "[redacted]" in message
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "sk-ABCDEFGH12345678",
+            "sk_ABCDEFGH12345678",
+            "key-ABCDEFGH12345678",
+            "key_ABCDEFGH12345678",
+            "token-ABCDEFGH12345678",
+            "token_ABCDEFGH12345678",
+        ],
+    )
+    def test_each_documented_prefix_is_redacted(self, token: str) -> None:
+        """Every prefix the spec promises, one cell each.
+
+        A single case would stay green while five of the six silently
+        stopped matching.
+        """
+        message = self._err_for(f"upstream said: {token}", key="")
+        assert token not in message
+        assert "[redacted]" in message
+
+    def test_ordinary_words_are_not_redacted(self) -> None:
+        """The paired negative: redaction that eats prose is a different bug.
+
+        `token-` needs 8+ opaque characters after it, so an English
+        sentence about tokens survives intact.
+        """
+        message = self._err_for("the token-based flow needs a key-holder", key="")
+        assert "token-based" in message
+        assert "key-holder" in message
+        assert "[redacted]" not in message
+
+    def test_redaction_precedes_truncation(self) -> None:
+        """A key clipped in half would leave a usable prefix in the message."""
+        body = "x" * (_ERROR_BODY_CHARS - 10) + f" {self._KEY} " + "y" * 500
+        message = self._err_for(body)
+        assert self._KEY not in message
+        assert self._KEY[:20] not in message
+
+
+# =====================================================================
+# Spec 9.5.5's promise: every provider-backed Err names provider AND model
+# =====================================================================
+
+
+class TestProviderAndModelNaming1333:
+    """The claim in spec 9.5.5 is a contract; these cells are its test.
+
+    It was false for two whole kinds when written: the UTF-8 failure
+    named no model, and a transport failure reached the boundary — which
+    knew the provider but had never resolved the model — so
+    `URLError`/`TimeoutError`/`ConnectionRefusedError` were labelled with
+    the provider alone.
+    """
+
+    #: ORDERED, not two presence checks: `provider` and `model` swapped
+    #: into each other's placeholders satisfies `"anthropic" in message`
+    #: and `"claude-opus-5" in message` both, and reads as nonsense.
+    _NAMED = re.compile(r"Inference provider 'anthropic' \(claude-opus-5\)")
+
+    def test_shape_failure_names_both_in_order(self) -> None:
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", _anthropic_body({"type": "thinking"}))
+        assert self._NAMED.search(str(excinfo.value))
+
+    def test_utf8_failure_names_both_in_order(self) -> None:
+        """Was `Inference provider 'anthropic' returned a response body…`."""
+        with patch(
+            "urllib.request.urlopen",
+            MagicMock(return_value=_mock_response_bytes(b"hi \xff\xfe there")),
+        ), pytest.raises(InferenceError) as excinfo:
+            _call_inference_provider("anthropic", "prompt", "", "sk-test")
+        assert self._NAMED.search(str(excinfo.value))
+
+    def test_http_rejection_names_both_in_order(self) -> None:
+        with pytest.raises(InferenceError) as excinfo:
+            _call_raising("anthropic", _http_error(401, "{}"))
+        assert self._NAMED.search(str(excinfo.value))
+
+    def test_non_json_body_names_both_in_order(self) -> None:
+        with pytest.raises(InferenceError) as excinfo:
+            _call("anthropic", "<html>nope</html>")
+        assert self._NAMED.search(str(excinfo.value))
+
+    #: The transport failures that never reach the parse at all, so the
+    #: boundary is the only place that can name the model.
+    _TRANSPORT = (
+        ("URLError", urllib.error.URLError("dns")),
+        ("TimeoutError", TimeoutError("timed out")),
+        ("ConnectionRefusedError", ConnectionRefusedError(61, "Connection refused")),
+    )
+
+    @pytest.mark.parametrize(
+        ("label", "exc"), _TRANSPORT, ids=[row[0] for row in _TRANSPORT],
+    )
+    def test_transport_failure_names_both_in_order(
+        self, label: str, exc: BaseException,
+    ) -> None:
+        """The boundary label, end to end — the kind that had no model at all."""
+        result = _compile_ok(_CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider", side_effect=exc,
+        ):
+            exec_result = execute(
+                result, env_vars={"VERA_ANTHROPIC_API_KEY": "sk-ant-test"},
+            )
+        assert exec_result.value == 1
+        assert self._NAMED.search(exec_result.stdout)
+        assert label in exec_result.stdout
+
+    def test_boundary_names_the_overriding_model_not_the_default(self) -> None:
+        """`VERA_INFERENCE_MODEL` is what answered, so it is what is named.
+
+        A label hardcoding the registry default would satisfy every cell
+        above and be actively misleading on exactly the runs where the
+        model is the variable under test.
+        """
+        result = _compile_ok(_CLASSIFY_SOURCE)
+        with patch(
+            "vera.runtime.inference._call_inference_provider",
+            side_effect=TimeoutError("timed out"),
+        ):
+            exec_result = execute(result, env_vars={
+                "VERA_ANTHROPIC_API_KEY": "sk-ant-test",
+                "VERA_INFERENCE_MODEL": "claude-opus-4-6",
+            })
+        assert exec_result.stdout.startswith(
+            "Inference provider 'anthropic' (claude-opus-4-6) failed: "
+        )
 
 
 #: The maintainer's six-provider sweep, in registry order, each row carrying

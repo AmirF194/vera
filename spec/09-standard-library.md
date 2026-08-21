@@ -556,10 +556,14 @@ private fn classify(@String -> @Result<String, String>)
 | `VERA_MISTRAL_API_KEY` | Mistral AI API key |
 | `VERA_XAI_API_KEY` | xAI (Grok) API key |
 | `VERA_DEEPSEEK_API_KEY` | DeepSeek API key |
-| `VERA_INFERENCE_PROVIDER` | Force a provider (`anthropic`, `openai`, `moonshot`, `mistral`, `xai`, `deepseek`).  When unset, the provider is the **first** of those whose key is present, in that order — so several keys at once resolve to the earliest rather than to the one most recently exported.  Every provider-backed `Err` names the provider and model that answered, so a run can always be attributed (the browser `Err` below reaches no provider to name) |
+| `VERA_INFERENCE_PROVIDER` | Force a provider (`anthropic`, `openai`, `moonshot`, `mistral`, `xai`, `deepseek`).  When unset, the provider is the **first** of those whose key is present, in that order — so several keys at once resolve to the earliest rather than to the one most recently exported.  Every provider-backed `Err` names the provider and the model that answered — including the ones raised before any response arrives, such as a DNS or timeout failure — so a run can always be attributed (the browser `Err` below reaches no provider to name) |
 | `VERA_INFERENCE_MODEL` | Override the model.  Each provider's default is its flagship general-chat model: `claude-opus-5`, `gpt-5.6-sol`, `kimi-k3`, `mistral-large-latest`, `grok-4.6`, `deepseek-v4-pro`.  A cheaper tier is reached by setting this variable |
 
 **Browser:** the browser runtime binds `Inference.complete` but never calls a provider — every invocation returns an explanatory `Err`, so a program compiled with `<Inference>` still loads and runs in the browser and handles the refusal through the same `Result` it already matches on. Embedding API keys in client-side JavaScript would expose them in page source and network traffic; route inference through a server-side proxy called with the `Http` effect.
+
+**Error text from the provider.** When a provider rejects a request, its own message is surfaced in the `Err` rather than only the HTTP status line. That text is read under a fixed cap, truncated, and **redacted**: the configured API key and any credential-shaped token — `sk-`, `sk_`, `key-`, `key_`, `token-` or `token_` followed by eight or more of `[A-Za-z0-9_-]` — are replaced with `[redacted]`. Providers quote the key they rejected (`Incorrect API key provided: sk-…`), and an `Err` is an ordinary Vera value that a program may print, log, or send onward.
+
+**Accepted response shapes.** On the Anthropic branch the completion is every `content` block whose `type` is `"text"`, joined in order. On the OpenAI-compatible branch it is `message.content` when that is a string, or every part whose `type` is `"text"` or `"output_text"` when it is a list. A block or part that carries no `text` field, or whose `text` is not a string, is an error rather than a value to coerce; `message.refusal` is surfaced when the model declined.
 
 **Limitations in this release:**
 - `complete` only — `embed` (returning `Array<Float64>`) is deferred ([#371](https://github.com/aallan/vera/issues/371))

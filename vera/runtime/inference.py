@@ -6,6 +6,7 @@ provider registry and HTTP call helper, which are used only by this family.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -130,11 +131,42 @@ _ERROR_BODY_CAP = 64 * 1024
 
 
 def _truncate(text: str) -> str:
-    """*text*, clipped to `_ERROR_BODY_CHARS` with the clipping made visible."""
-    text = text.strip()
+    """*text*, clipped to `_ERROR_BODY_CHARS` with the clipping made visible.
+
+    A bounded WINDOW is sliced before stripping.  Every caller feeds this
+    values that came from a remote server, and `strip()` on a 64 MB
+    `stop_reason` would copy the whole thing in order to discard all but
+    200 characters of it.  The window is four times the bound, so leading
+    whitespace cannot push real text out of view.
+    """
     if len(text) <= _ERROR_BODY_CHARS:
-        return text
-    return text[:_ERROR_BODY_CHARS] + "... (truncated)"
+        return text.strip()
+    head = text[: _ERROR_BODY_CHARS * 4].strip()
+    if len(head) <= _ERROR_BODY_CHARS:
+        return head
+    return head[:_ERROR_BODY_CHARS] + "... (truncated)"
+
+
+#: Credential-shaped tokens: a recognised prefix, then enough opaque
+#: characters to be a secret rather than a word.  A provider's 401 body
+#: quotes the key it rejected ("Incorrect API key provided: sk-ant-…"),
+#: and this module lifts that body into a Vera-level `Result::Err` — a
+#: value the program goes on to print, log, or ship to CI.
+_CREDENTIAL_RE = re.compile(r"(?:sk|key|token)[-_][A-Za-z0-9_-]{8,}")
+
+
+def _redact(text: str, api_key: str) -> str:
+    """*text* with the configured key and credential-shaped tokens removed.
+
+    Two rules, because neither covers the other: the configured key is
+    matched exactly (it may have any shape at all, including one the
+    pattern would miss), and the pattern catches keys this process was
+    never given — a proxy quoting a DIFFERENT tenant's credential, or the
+    same key in a form the exact match cannot see.
+    """
+    if api_key and api_key in text:
+        text = text.replace(api_key, "[redacted]")
+    return _CREDENTIAL_RE.sub("[redacted]", text)
 
 
 def _describe_keys(value: object) -> str:
@@ -143,10 +175,11 @@ def _describe_keys(value: object) -> str:
     Used only inside error messages: when a response does not have the
     shape the branch expects, naming what it DID have is the difference
     between a report the user can act on and one they have to reproduce
-    under a debugger.
+    under a debugger.  Bounded, because the key list is attacker-shaped
+    too — 3,000 keys is a 20,000-character message otherwise.
     """
     if isinstance(value, dict):
-        return ", ".join(str(k) for k in value) or "(no keys)"
+        return _truncate(", ".join(str(k) for k in value)) or "(no keys)"
     return f"(not an object: {type(value).__name__})"
 
 
@@ -155,7 +188,8 @@ def _describe_types(items: list[object]) -> str:
 
     This is what turns #1333's failure into a self-explaining one: an
     Anthropic response with no text block reports `thinking` rather than
-    an unqualified "no text".
+    an unqualified "no text".  Bounded for the same reason as
+    `_describe_keys`.
     """
     seen: list[str] = []
     for item in items:
@@ -166,34 +200,76 @@ def _describe_types(items: list[object]) -> str:
         )
         if kind not in seen:
             seen.append(kind)
-    return ", ".join(seen) or "(none)"
+    return _truncate(", ".join(seen)) or "(none)"
 
 
-def _stop_reason_clause(data: object) -> str:
-    """`; stop_reason=<value>` when the response carries one, else "".
+def _reason_clause(container: object, field: str) -> str:
+    """`; <field>=<value>` when *container* carries one, else "".
 
-    Appended to the no-text-block message only.  A response that stopped
-    at `max_tokens` with nothing but a thinking block is a budget
-    problem, not a malformed provider; one that stopped at `end_turn`
-    with no text is the provider behaving oddly.  The message cannot
-    tell those apart without this field, and the reader cannot act
-    without knowing which they have.
+    `stop_reason` (Anthropic) and `finish_reason` (OpenAI-style) are what
+    distinguish "the model chose to say nothing" from "the reply was cut
+    off before it got to the text" — a thinking-only response that hits
+    the request's max_tokens is a budget problem, not a malformed
+    provider, and the reader cannot act without knowing which they have.
 
     Returns "" when the field is absent so a provider that omits it
-    produces a clean message rather than a dangling `stop_reason=None`.
+    produces a clean message rather than a dangling `=None`.  The value
+    is bounded: it is provider-supplied text like any other.
     """
-    if not isinstance(data, dict):
+    if not isinstance(container, dict):
         return ""
-    reason = data.get("stop_reason")
-    if reason is None or reason == "":
+    value = container.get(field)
+    if value is None or value == "":
         return ""
-    return f"; stop_reason={reason}"
+    return f"; {field}={_truncate(str(value))}"
+
+
+def _missing_or_wrong(
+    container: object, field: str, expected: str, where: str = "response",
+) -> str:
+    """Why *field* is unusable on *container*: absent, or the wrong type.
+
+    Collapsing the two produced messages that contradicted themselves —
+    `{"content": "Positive"}` reported "no 'content' list in the
+    response; response keys: content", naming the key it had just said
+    was missing.  Absent and present-but-wrong-typed are different
+    faults with different fixes, so they read differently.
+
+    *where* names the object being described, because these fields do not
+    all hang off the response: `message` hangs off a CHOICE, and a
+    message saying "in the response" while listing the choice's keys is
+    the same self-contradiction one level down.
+    """
+    if not isinstance(container, dict):
+        return f"the {where} is {type(container).__name__}, not an object"
+    if field not in container:
+        return (
+            f"no '{field}' {expected} in the {where}; "
+            f"{where} keys: {_describe_keys(container)}"
+        )
+    article = "an" if expected[:1].lower() in "aeiou" else "a"
+    return (
+        f"'{field}' is {type(container[field]).__name__}, "
+        f"not {article} {expected}"
+    )
+
+
+#: The part discriminators the OpenAI-style branch accepts.  The
+#: Responses API and the gateways that mirror it spell a text part
+#: `output_text`; those worked on v0.1.12 because the old code read
+#: `content` positionally and never looked at `type` at all, so selecting
+#: by type alone would have regressed them.
+_OPENAI_TEXT_TYPES = ("text", "output_text")
 
 
 def _text_fragments(
-    items: list[object], provider: str, model: str, kind: str,
+    items: list[object],
+    provider: str,
+    model: str,
+    kind: str,
+    discriminators: tuple[str, ...] = ("text",),
 ) -> list[str]:
-    """Every `type == "text"` entry's text, in order, as strings.
+    """Every text entry's text, in order, as strings.
 
     The `str()` this replaced was a silent-wrong-answer generator of
     exactly the kind #1333 exists to close, one level deeper than the
@@ -201,20 +277,24 @@ def _text_fragments(
     `text` is `null` coerced to the string `"None"` and reached the Vera
     program as a SUCCESSFUL completion, and a `text` holding an object
     reached it as a Python repr.  A response the provider did not fill
-    in is a refusal to report, never a value to stringify — so only a
-    real `str` is accepted and anything else names its own type.
+    in is a refusal to report, never a value to stringify.
 
-    A `type == "text"` entry with no `text` key at all is skipped rather
-    than refused: it yields no fragment, so the caller's existing
-    no-text-block error covers it, and that message already reports the
-    block types it saw.
+    A selected entry with NO `text` key is refused on the same footing.
+    It was skipped once, which made two malformed shapes behave
+    differently for no reason a caller could see: `[{"type": "text"},
+    {"type": "text", "text": "Positive"}]` returned `Ok("Positive")`
+    while the same pair with `"text": null` refused.  Both are a
+    provider failing to fill in a block it typed as text.
     """
     fragments: list[str] = []
     for item in items:
-        if not isinstance(item, dict) or item.get("type") != "text":
+        if not isinstance(item, dict) or item.get("type") not in discriminators:
             continue
         if "text" not in item:
-            continue
+            raise InferenceError(
+                f"Inference provider '{provider}' ({model}) returned a "
+                f"{kind} with no 'text' field (keys: {_describe_keys(item)}).",
+            )
         value = item["text"]
         if not isinstance(value, str):
             raise InferenceError(
@@ -226,7 +306,7 @@ def _text_fragments(
     return fragments
 
 
-def _error_body_detail(raw: bytes) -> str:
+def _error_body_detail(raw: bytes, api_key: str = "") -> str:
     """The provider's own message out of an HTTP error body.
 
     Anthropic and every OpenAI-compatible provider spell a rejection as
@@ -235,28 +315,36 @@ def _error_body_detail(raw: bytes) -> str:
     back to the raw text, truncated.  Decoded with ``errors="replace"``
     because a non-UTF-8 error body must still produce an error message
     rather than a second, unrelated failure.
+
+    Everything returned is redacted BEFORE it is truncated: a key clipped
+    in half would leave a recognisable prefix in the message, which is
+    most of what makes a leaked credential useful to a reader.
     """
     import json as _json
 
-    text = raw.decode("utf-8", errors="replace").strip()
-    if not text:
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
         return "(empty response body)"
+
+    def _detail(value: str) -> str:
+        return _truncate(_redact(value, api_key))
+
     try:
         parsed = _json.loads(text)
     except ValueError:
-        return _truncate(text)
+        return _detail(text)
     if isinstance(parsed, dict):
         err = parsed.get("error")
         if isinstance(err, dict) and isinstance(err.get("message"), str):
-            return _truncate(str(err["message"]))
+            return _detail(str(err["message"]))
         if isinstance(err, str) and err:
-            return _truncate(err)
+            return _detail(err)
         if isinstance(parsed.get("message"), str):
-            return _truncate(str(parsed["message"]))
-    return _truncate(text)
+            return _detail(str(parsed["message"]))
+    return _detail(text)
 
 
-def _read_error_body(http_err: HTTPError) -> str:
+def _read_error_body(http_err: HTTPError, api_key: str = "") -> str:
     """The provider's error detail, read under a cap and never fatally.
 
     A bare `http_err.read()` pulls the WHOLE body into memory before
@@ -296,8 +384,8 @@ def _read_error_body(http_err: HTTPError) -> str:
         # whatever survived stripping.  `_truncate` marks on length alone,
         # so a short envelope padded past the cap with whitespace strips
         # back under the bound and would be reported as if complete.
-        return head[:_ERROR_BODY_CHARS] + "... (truncated)"
-    return _error_body_detail(raw)
+        return _redact(head, api_key)[:_ERROR_BODY_CHARS] + "... (truncated)"
+    return _error_body_detail(raw, api_key)
 
 
 def _call_inference_provider(
@@ -362,8 +450,8 @@ def _call_inference_provider(
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError as ude:
                 raise InferenceError(
-                    f"Inference provider '{provider}' returned a "
-                    f"response body that is not valid UTF-8 "
+                    f"Inference provider '{provider}' ({chosen_model}) "
+                    f"returned a response body that is not valid UTF-8 "
                     f"(invalid byte at position {ude.start}).",
                 ) from None
     except _urlerr.HTTPError as http_err:
@@ -372,7 +460,7 @@ def _call_inference_provider(
         # provider that rejected the request nor the reason it gave.
         # The status line is the least useful half of what the API
         # actually sent back.
-        detail = _read_error_body(http_err)
+        detail = _read_error_body(http_err, api_key)
         raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) rejected "
             f"the request: HTTP {http_err.code}: {detail}",
@@ -404,23 +492,21 @@ def _call_inference_provider(
     if cfg.response_style == "anthropic":
         content = data.get("content") if isinstance(data, dict) else None
         if not isinstance(content, list):
+            # `stop_reason` on THIS branch too: a response whose content
+            # is null but which stopped at `end_turn` was dropping the one
+            # field that explained it.
             raise InferenceError(
                 f"Inference provider '{provider}' ({chosen_model}) returned "
-                f"no text block (no 'content' list in the response; "
-                f"response keys: {_describe_keys(data)}).",
+                f"no text block ({_missing_or_wrong(data, 'content', 'list')}"
+                f"{_reason_clause(data, 'stop_reason')}).",
             )
         texts = _text_fragments(content, provider, chosen_model, "text block")
         if not texts:
-            # `stop_reason` is what distinguishes "the model chose to say
-            # nothing" from "the reply was cut off before it got to the
-            # text" — a thinking-only response that hits the request's
-            # max_tokens is the likeliest producer of this shape, and the
-            # message should say so rather than leave it to be guessed.
             raise InferenceError(
                 f"Inference provider '{provider}' ({chosen_model}) returned "
                 f"no text block (content block types: "
                 f"{_describe_types(content)}"
-                f"{_stop_reason_clause(data)}).",
+                f"{_reason_clause(data, 'stop_reason')}).",
             )
         # Joined without a separator: consecutive text blocks are
         # fragments of one message, so concatenation reconstructs
@@ -430,29 +516,72 @@ def _call_inference_provider(
     # openai-style
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
+        detail = (
+            "the 'choices' list is empty"
+            if isinstance(choices, list)
+            else _missing_or_wrong(data, "choices", "list")
+        )
         raise InferenceError(
             f"Inference provider '{provider}' ({chosen_model}) returned no "
-            f"completion text (no 'choices' list in the response; "
-            f"response keys: {_describe_keys(data)}).",
+            f"completion text ({detail}).",
         )
+
     first = choices[0]
-    message = first.get("message") if isinstance(first, dict) else None
-    content = message.get("content") if isinstance(message, dict) else None
+    # Read off the choice, not the response: `finish_reason` is the
+    # OpenAI-style analogue of `stop_reason`, and it is what says a reply
+    # was cut at the token budget rather than withheld.
+    finish = _reason_clause(first, "finish_reason")
+    if not isinstance(first, dict):
+        raise InferenceError(
+            f"Inference provider '{provider}' ({chosen_model}) returned no "
+            f"completion text (the first choice is "
+            f"{type(first).__name__}, not an object).",
+        )
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise InferenceError(
+            f"Inference provider '{provider}' ({chosen_model}) returned no "
+            f"completion text ("
+            f"{_missing_or_wrong(first, 'message', 'object', 'choice')}"
+            f"{finish}).",
+        )
+
+    def _refusal_or(detail: str) -> InferenceError:
+        """A refusal turn explains itself; anything else reports the shape.
+
+        `message.refusal` is the OpenAI-style spelling of "the model
+        declined", and it is the ANSWER — surfacing the shape of an empty
+        content field instead would describe the symptom and discard the
+        cause.  Truncated and redacted like any other provider text.
+        """
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal.strip():
+            return InferenceError(
+                f"Inference provider '{provider}' ({chosen_model}) refused "
+                f"the request: {_truncate(_redact(refusal, api_key))}{finish}",
+            )
+        return InferenceError(
+            f"Inference provider '{provider}' ({chosen_model}) returned no "
+            f"completion text ({detail}{finish}).",
+        )
+
+    content = message.get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = _text_fragments(content, provider, chosen_model, "text part")
+        parts = _text_fragments(
+            content, provider, chosen_model, "text part", _OPENAI_TEXT_TYPES,
+        )
         if parts:
             return "".join(parts)
-        raise InferenceError(
-            f"Inference provider '{provider}' ({chosen_model}) returned no "
-            f"completion text (no text parts in the message content; "
-            f"part types: {_describe_types(content)}).",
+        raise _refusal_or(
+            f"no text parts in the message content; "
+            f"part types: {_describe_types(content)}"
         )
-    raise InferenceError(
-        f"Inference provider '{provider}' ({chosen_model}) returned no "
-        f"completion text (message content is {type(content).__name__}; "
-        f"message keys: {_describe_keys(message)}).",
+    raise _refusal_or(
+        _missing_or_wrong(
+            message, "content", "string or list of parts", "message",
+        )
     )
 
 
@@ -500,8 +629,14 @@ def register_inference(
                     f"{cfg.env_key} is not set.",
                 )
 
+            model = _env.get("VERA_INFERENCE_MODEL", "")
+            # Resolved here, not inside the call, so the label below can
+            # name it: spec 9.5.5 promises every provider-backed Err names
+            # the provider AND the model, and a transport failure
+            # (URLError, TimeoutError, ConnectionRefusedError) never
+            # reaches the code that knew which model was asked for.
+            resolved_model = model or (cfg.default_model if cfg else "unknown")
             try:
-                model = _env.get("VERA_INFERENCE_MODEL", "")
                 completion = _call_inference_provider(
                     provider, prompt, model, api_key,
                 )
@@ -532,8 +667,8 @@ def register_inference(
                     return _alloc_result_err_string(caller, str(exc))
                 return _alloc_result_err_string(
                     caller,
-                    f"Inference provider '{provider}' failed: "
-                    f"{type(exc).__name__}: {exc}",
+                    f"Inference provider '{provider}' ({resolved_model}) "
+                    f"failed: {type(exc).__name__}: {exc}",
                 )
 
         linker.define_func(
