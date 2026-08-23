@@ -277,7 +277,7 @@
       <p class="thesis">The biggest problem models face isn't syntax &mdash; it's coherence over scale. Models are pattern matchers optimising for local plausibility, not architects holding the entire system in mind.</p>
       <p>The <a href="https://arxiv.org/abs/2307.12488">empirical literature</a> shows models are particularly vulnerable to naming-related errors: choosing misleading names, reusing names incorrectly, and losing track of which name refers to which value. Vera addresses this by making everything explicit and verifiable.</p>
       <p>The model doesn't need to be right. It needs to be <em>checkable</em>. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.</p>
-      <img src="loop-web.svg" alt="The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI." width="828" height="188" loading="lazy" style="width:100%;max-width:860px;height:auto;display:block;margin:2.25rem auto">
+      <img src="loop-web.svg" alt="The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component." width="828" height="188" loading="lazy" style="width:100%;max-width:860px;height:auto;display:block;margin:2.25rem auto">
       <p style="margin-top:1.5rem">For deeper questions about the design &mdash; why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka &mdash; see the <a href="https://github.com/aallan/vera/blob/main/FAQ.md">FAQ</a>.</p>
     </div>
   </section>
@@ -300,7 +300,7 @@
 }</pre>
         </div>
         <aside class="aside">
-          <strong>Read the slots.</strong> <code>@Int.1</code> is the first parameter, <code>@Int.0</code> is the second &mdash; De Bruijn indexing, most-recent first. No variable names means no naming bug is possible. The <code>requires</code> clause is what lifts divide-by-zero from a runtime crash to a compile-time error. <a href="https://github.com/aallan/vera/blob/main/examples/safe_divide.vera">examples/safe_divide.vera</a>.
+          <strong>Read the slots.</strong> <code>@Int.1</code> is the first parameter, <code>@Int.0</code> is the second &mdash; De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The <code>requires</code> clause is what lifts divide-by-zero from a runtime crash to a compile-time error. <a href="https://github.com/aallan/vera/blob/main/examples/safe_divide.vera">examples/safe_divide.vera</a>.
         </aside>
       </div>
 
@@ -522,7 +522,7 @@
       <div class="ref-grid">
         <div class="ref-item"><div class="num">01</div><div class="title">Checkability over correctness</div><div class="desc">Code the compiler can mechanically check. Every diagnostic carries a concrete fix in natural language.</div></div>
         <div class="ref-item"><div class="num">02</div><div class="title">Explicitness over convenience</div><div class="desc">All state changes declared. All effects typed. All contracts mandatory. No implicit behaviour.</div></div>
-        <div class="ref-item"><div class="num">03</div><div class="title">One canonical form</div><div class="desc">Every construct has exactly one textual representation. <code>vera fmt</code> settles it.</div></div>
+        <div class="ref-item"><div class="num">03</div><div class="title">One canonical form</div><div class="desc">One preferred spelling per construct, one formatted representation per program. <code>vera fmt</code> settles it.</div></div>
         <div class="ref-item"><div class="num">04</div><div class="title">Structural references over names</div><div class="desc">Bindings referenced by type and positional index (<code>@T.n</code>), not arbitrary names.</div></div>
         <div class="ref-item"><div class="num">05</div><div class="title">Contracts as the source of truth</div><div class="desc">Every function declares what it requires and guarantees. The compiler verifies statically where possible.</div></div>
         <div class="ref-item"><div class="num">06</div><div class="title">Constrained expressiveness</div><div class="desc">Fewer valid programs means fewer opportunities for the model to be wrong.</div></div>
@@ -531,7 +531,7 @@
       <p class="ref-subhead">Key features</p>
       <div class="ref-grid ref-grid--flow">
         <div class="ref-item"><div class="title">No variable names</div><div class="desc">Typed <a href="https://github.com/aallan/vera/blob/main/DE_BRUIJN.md">De Bruijn indices</a> (<code>@T.n</code>) replace variable names: <code>@Int.0</code> is the most-recent <code>Int</code> binding, <code>@Int.1</code> the one before. The whole class of naming hallucinations is removed at the language level, not caught after the fact.</div></div>
-        <div class="ref-item"><div class="title">Full contracts</div><div class="desc">Mandatory preconditions, postconditions, invariants, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM &mdash; no manual test cases.</div></div>
+        <div class="ref-item"><div class="title">Full contracts</div><div class="desc">Mandatory preconditions, postconditions, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM &mdash; no manual test cases.</div></div>
         <div class="ref-item"><div class="title">SQL injection won&rsquo;t compile</div><div class="desc">The <code>&lt;DB&gt;</code> effect accepts only a literal query string &mdash; built from string literals, never spliced from a runtime value. Interpolating user input into SQL is a compile-time error (<code>E207</code>); every value flows through a <code>?</code> placeholder instead. Injection safety stops being a discipline you remember and becomes one the compiler enforces.</div></div>
         <div class="ref-item"><div class="title">Algebraic effects</div><div class="desc">IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge &mdash; declared, typed, and handled explicitly. Pure by default.</div></div>
         <div class="ref-item"><div class="title">Refinement types</div><div class="desc">Types that express constraints like &ldquo;a list of positive integers of length <code>n</code>&rdquo;.</div></div>
@@ -552,7 +552,7 @@
     <div class="col col-wide">
       <div class="eyebrow"><span class="slot">@section.05</span> · runtime</div>
       <h2>Runs Everywhere</h2>
-      <p class="lead" style="max-width:58ch">Vera compiles to WebAssembly. The same <code>.wasm</code> runs at the command line via <a href="https://wasmtime.dev/">wasmtime</a>, in any browser with a self-contained JS runtime, or as a portable WASI 0.2 component under any stock wasip2 host.</p>
+      <p class="lead" style="max-width:58ch">Vera compiles to WebAssembly. The same <code>.wasm</code> runs at the command line (via <a href="https://wasmtime.dev/">wasmtime</a>) and in the browser (wrapped in a self-contained JS runtime); WASI 0.2 is a separate portable component built from the same source.</p>
 
       <div class="twocol" style="margin-top:1.75rem">
         <div>

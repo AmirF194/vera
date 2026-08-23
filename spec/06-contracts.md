@@ -22,7 +22,7 @@ public fn safe_divide(@Int, @Int -> @Int)
 }
 ```
 
-At every call site of `safe_divide`, the compiler verifies that the second argument is non-zero. If it cannot prove this statically, it inserts a runtime check.
+At every call site of `safe_divide`, the compiler verifies that the first argument is non-zero — `@Int.1` is the first parameter under most-recent-first indexing (Chapter 3). If it cannot prove this statically, it inserts a runtime check.
 
 ### 6.2.2 Postconditions (`ensures`)
 
@@ -377,7 +377,7 @@ private fn apply_div(@Int, @Int, @SafeDiv -> @Int)
 }
 ```
 
-The refinement type on the function parameter's second argument serves as the contract. The compiler verifies at the call site that `@Int.1 != 0` (which follows from the precondition).
+The refinement on `SafeDiv`'s **second** parameter serves as the contract. The call passes `@Int.1` into that refined position, so the compiler verifies `@Int.1 != 0` at the call site — `apply_div`'s first `@Int` parameter, which follows from the precondition.
 
 ## 6.8 Summary of Verification Tiers
 
@@ -399,6 +399,22 @@ Verification summary:
    1 contract checked at runtime (Tier 3)
    0 assumptions (assume statements)
 ```
+
+### 6.8.1 Obligation Vocabulary
+
+Every obligation this chapter describes ends in exactly one of the first four states below; the remaining rows name adjacent concepts that are easily mistaken for them. The middle column is the `status` field `vera verify --json` reports for that obligation, so the words used in prose and the machine output are the same set.
+
+| Word | `--json` status | Meaning |
+|------|-----------------|---------|
+| **proved** | `verified` | Tier 1. Z3 discharged the obligation; it holds for every input. Counted in `tier1_verified`. |
+| **runtime-guarded** | `tier3`, `timeout` | Tier 3. Not proved, but the compiler emitted a guard that traps on violation. Counted in `tier3_runtime`. |
+| **unguarded** | `tier3_unguarded` | Neither proved nor guarded. Reported as a warning (`E504`, `E506`, `E531`) and counted in no tier. |
+| **refuted** | `violated` | Z3 found a counterexample. A compile error (`E500`, `E501`, `E502`, `E505`, …), counted in no tier. |
+| **assumed** | — | An `assume` statement (Section 6.2.6), not an obligation: the fact is taken on trust rather than discharged, so it reaches no tier and is counted nowhere. It is an unsound escape hatch. |
+| **tested** | — | `vera test` generates inputs from the contracts and runs them through WASM. A distinct activity rather than a tier: it samples inputs, it does not quantify over them. |
+| **specified, not implemented** | — | Carried by the `Status:` callouts in this specification and collected in the [implementation-status appendix](../docs/implementation-status.md). |
+
+The counts partition accordingly: `total == tier1_verified + tier3_runtime`. A `violated` or `tier3_unguarded` obligation is discharged to no tier, so it appears in the `obligations` array and in the diagnostics, but in neither count.
 
 ## 6.9 Limitations
 

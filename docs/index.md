@@ -16,7 +16,7 @@ The [empirical literature](https://arxiv.org/abs/2307.12488) shows models are pa
 
 The model doesn't need to be right. It needs to be *checkable*. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.
 
-![The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI.](https://veralang.dev/loop-web.svg)
+![The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component.](https://veralang.dev/loop-web.svg)
 
 For deeper questions about the design — why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka — see the [FAQ](https://raw.githubusercontent.com/aallan/vera/main/FAQ.md).
 
@@ -34,7 +34,7 @@ public fn safe_divide(@Int, @Int -> @Int)
 }
 ```
 
-Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No variable names means no naming bug is possible. The `requires` clause is what lifts divide-by-zero from a runtime crash to a compile-time error. [examples/safe_divide.vera](https://github.com/aallan/vera/blob/main/examples/safe_divide.vera).
+Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The `requires` clause is what lifts divide-by-zero from a runtime crash to a compile-time error. [examples/safe_divide.vera](https://github.com/aallan/vera/blob/main/examples/safe_divide.vera).
 
 ```vera
 public fn fizzbuzz(@Nat -> @String)
@@ -171,7 +171,7 @@ Full source and data: [https://github.com/aallan/vera-bench](https://github.com/
 
 1. **Checkability over correctness** — Code the compiler can mechanically check. Every diagnostic carries a concrete fix in natural language.
 2. **Explicitness over convenience** — All state changes declared. All effects typed. All contracts mandatory. No implicit behaviour.
-3. **One canonical form** — Every construct has exactly one textual representation. `vera fmt` settles it.
+3. **One canonical form** — one preferred spelling per construct, one formatted representation per program. `vera fmt` settles it.
 4. **Structural references over names** — Bindings referenced by type and positional index (`@T.n`), not arbitrary names.
 5. **Contracts as the source of truth** — Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness** — Fewer valid programs means fewer opportunities for the model to be wrong.
@@ -179,7 +179,7 @@ Full source and data: [https://github.com/aallan/vera-bench](https://github.com/
 ## Key Features
 
 - **No variable names** — Typed [De Bruijn indices](https://raw.githubusercontent.com/aallan/vera/main/DE_BRUIJN.md) (`@T.n`) replace variable names: `@Int.0` is the most-recent `Int` binding, `@Int.1` the one before. The whole class of naming hallucinations is removed at the language level, not caught after the fact.
-- **Full contracts** — Mandatory preconditions, postconditions, invariants, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
+- **Full contracts** — Mandatory preconditions, postconditions, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
 - **SQL injection won't compile** — The `<DB>` effect accepts only a literal query string — built from string literals, never spliced from a runtime value. Interpolating user input into SQL is a compile-time error (`E207`); every value flows through a `?` placeholder instead. Injection safety stops being a discipline you remember and becomes one the compiler enforces.
 - **Algebraic effects** — IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge — declared, typed, and handled explicitly. Pure by default.
 - **Refinement types** — Types that express constraints like "a list of positive integers of length `n`".
@@ -193,7 +193,7 @@ Full source and data: [https://github.com/aallan/vera-bench](https://github.com/
 
 ## Runs Everywhere
 
-Vera compiles to WebAssembly. The same `.wasm` runs at the command line via [wasmtime](https://wasmtime.dev/), in any browser with a self-contained JS runtime, or as a portable WASI 0.2 component under any stock wasip2 host.
+Vera compiles to WebAssembly. The same `.wasm` runs at the command line (via [wasmtime](https://wasmtime.dev/)) and in the browser (wrapped in a self-contained JS runtime); WASI 0.2 is a separate portable component built from the same source.
 
 ### Command line
 

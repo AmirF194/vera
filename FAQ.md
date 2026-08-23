@@ -256,7 +256,7 @@ No production language today combines mandatory contracts, algebraic effects, re
 
 ## Why WebAssembly?
 
-Three reasons. First, portability — the same `.wasm` binary runs at the command line or in any browser. Second, sandboxing — WebAssembly has no ambient capabilities, so a Vera program cannot do anything its effect declarations don't permit. Third, the WASM Component Model (W3C, production-ready in Wasmtime) will enable Vera components to interoperate with Rust, Go, and Python components via WIT interfaces, providing ecosystem access without requiring a massive native package system.
+Three reasons. First, portability — the same `.wasm` module runs at the command line and in the browser, which is what the browser-parity suite asserts by running identical module bytes under both hosts; `--target wasi-p2` emits a WASI 0.2 component from that same source. Second, sandboxing — WebAssembly has no ambient capabilities, so a Vera program cannot do anything its effect declarations don't permit. Third, the WASM Component Model (W3C, production-ready in Wasmtime) will enable Vera components to interoperate with Rust, Go, and Python components via WIT interfaces, providing ecosystem access without requiring a massive native package system.
 
 
 ## Why Python for the compiler?
@@ -279,7 +279,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 12,133 tests, including a 244-program conformance suite
+- 12,141 tests, including a 244-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

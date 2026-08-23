@@ -145,6 +145,9 @@ memory management, and GC.
 - [Chapter 13: WASI Preview 2 Target]({RAW}/spec/13-wasi.md): The \
 `wasi-p2` compilation target — experimental WASI 0.2 components, the \
 `--world server` wasi:http backend, and the divergences from the core runtime.
+- [Implementation Status]({SITE}/implementation-status.md): Every \
+`Status:` callout in the specification, collected — the boundary between \
+what the reference compiler ships and what the chapters describe.
 
 ## Examples
 
@@ -316,6 +319,97 @@ def build_llms_full_txt(version: str) -> str:
 # ── robots.txt ──────────────────────────────────────────────────────
 
 
+#: A `Status:` callout in the specification — the marker a chapter uses to
+#: say that what it describes is not (or is only partly) implemented.  Two
+#: spellings are in use and both are discovered: a blockquote callout, and
+#: the bare paragraph form used in Chapter 13.  Matching only the blockquote
+#: form would silently drop the WASI chapter's, which is exactly the kind of
+#: omission this appendix exists to make impossible.
+_STATUS_CALLOUT_RE = re.compile(r"^(?:>\s*)?\*\*Status:", re.IGNORECASE)
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def _status_callouts(path: Path) -> list[tuple[str, int, str]]:
+    """Every `Status:` callout in *path* as (heading, line number, text).
+
+    The heading is the nearest preceding ATX heading, so a reader can find
+    the callout in its chapter without a line number.  The text keeps its
+    inline links intact — the issue each one cites is the actionable half.
+    """
+    out: list[tuple[str, int, str]] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    heading = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _HEADING_RE.match(line)
+        if m is not None:
+            heading = m.group(2)
+            i += 1
+            continue
+        if _STATUS_CALLOUT_RE.match(line):
+            start = i
+            quoted = line.lstrip().startswith(">")
+            body: list[str] = []
+            while i < len(lines):
+                cur = lines[i]
+                if quoted:
+                    if not cur.lstrip().startswith(">"):
+                        break
+                    body.append(cur.lstrip()[1:].lstrip())
+                else:
+                    # Bare paragraph: runs to the first blank line.
+                    if not cur.strip():
+                        break
+                    body.append(cur.strip())
+                i += 1
+            out.append((heading, start + 1, " ".join(body).strip()))
+            continue
+        i += 1
+    return out
+
+
+def build_impl_status() -> str:
+    """The shipped-versus-specified boundary, collected from the spec itself.
+
+    The specification marks every gap between what it describes and what the
+    reference compiler does with a `Status:` callout.  Those callouts are
+    accurate but scattered across fourteen chapters, so the boundary they
+    describe has never been readable in one place.  This page is that place,
+    and it is generated: a callout added to a chapter appears here without
+    anyone remembering to copy it, and one removed disappears.
+    """
+    chapters = sorted(
+        (ROOT / "spec").glob("*.md"), key=lambda p: p.name,
+    )
+    sections: list[str] = []
+    total = 0
+    for chapter in chapters:
+        callouts = _status_callouts(chapter)
+        if not callouts:
+            continue
+        total += len(callouts)
+        rel = chapter.relative_to(ROOT).as_posix()
+        sections.append(f"## [{rel}]({RAW}/{rel})\n")
+        for heading, line, text in callouts:
+            where = heading or "(chapter preamble)"
+            sections.append(f"### {where}\n")
+            sections.append(f"{text}\n")
+    body = "\n".join(sections)
+    n_chapters = sum(1 for c in chapters if _status_callouts(c))
+    return f"""<!-- GENERATED FILE — do not edit.
+     Source: scripts/build_site.py (build_impl_status).
+     Regenerate: python scripts/build_site.py -->
+
+# Implementation Status
+
+Vera's specification describes the language; the reference compiler implements most of it. Where the two stand apart, the chapter says so in a `Status:` callout — usually naming a gap, sometimes recording that a feature has landed. This page collects every one of those callouts — {total} across {n_chapters} chapters — so the boundary between what is shipped and what is specified is readable in one place.
+
+Each entry keeps its chapter's wording, including the issue it cites. The specification remains the normative source; this page is an index into it.
+
+{body}"""
+
+
 def build_robots_txt() -> str:
     """Build an AI-crawler-friendly robots.txt."""
     return f"""\
@@ -414,7 +508,7 @@ The [empirical literature](https://arxiv.org/abs/2307.12488) shows models are pa
 
 The model doesn't need to be right. It needs to be *checkable*. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.
 
-![The loop: the model writes Vera with mandatory contracts; the compiler proves every type and every contract via Z3; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI, browser, and WASI.]({SITE}/loop-web.svg)
+![The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component.]({SITE}/loop-web.svg)
 
 For deeper questions about the design — why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka — see the [FAQ]({RAW}/FAQ.md).
 
@@ -432,7 +526,7 @@ public fn safe_divide(@Int, @Int -> @Int)
 }}
 ```
 
-Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No variable names means no naming bug is possible. The `requires` clause is what lifts divide-by-zero from a runtime crash to a compile-time error. [examples/safe_divide.vera]({REPO}/blob/main/examples/safe_divide.vera).
+Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The `requires` clause is what lifts divide-by-zero from a runtime crash to a compile-time error. [examples/safe_divide.vera]({REPO}/blob/main/examples/safe_divide.vera).
 
 ```vera
 public fn fizzbuzz(@Nat -> @String)
@@ -569,7 +663,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 1. **Checkability over correctness** — Code the compiler can mechanically check. Every diagnostic carries a concrete fix in natural language.
 2. **Explicitness over convenience** — All state changes declared. All effects typed. All contracts mandatory. No implicit behaviour.
-3. **One canonical form** — Every construct has exactly one textual representation. `vera fmt` settles it.
+3. **One canonical form** — one preferred spelling per construct, one formatted representation per program. `vera fmt` settles it.
 4. **Structural references over names** — Bindings referenced by type and positional index (`@T.n`), not arbitrary names.
 5. **Contracts as the source of truth** — Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness** — Fewer valid programs means fewer opportunities for the model to be wrong.
@@ -577,7 +671,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 ## Key Features
 
 - **No variable names** — Typed [De Bruijn indices]({RAW}/DE_BRUIJN.md) (`@T.n`) replace variable names: `@Int.0` is the most-recent `Int` binding, `@Int.1` the one before. The whole class of naming hallucinations is removed at the language level, not caught after the fact.
-- **Full contracts** — Mandatory preconditions, postconditions, invariants, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
+- **Full contracts** — Mandatory preconditions, postconditions, and effect declarations on every function. Z3 generates test inputs from the contracts and runs them through WASM — no manual test cases.
 - **SQL injection won't compile** — The `<DB>` effect accepts only a literal query string — built from string literals, never spliced from a runtime value. Interpolating user input into SQL is a compile-time error (`E207`); every value flows through a `?` placeholder instead. Injection safety stops being a discipline you remember and becomes one the compiler enforces.
 - **Algebraic effects** — IO, Http, HttpServer, State, Exceptions, Async, Inference, DB, Random, Diverge — declared, typed, and handled explicitly. Pure by default.
 - **Refinement types** — Types that express constraints like "a list of positive integers of length `n`".
@@ -591,7 +685,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 ## Runs Everywhere
 
-Vera compiles to WebAssembly. The same `.wasm` runs at the command line via [wasmtime](https://wasmtime.dev/), in any browser with a self-contained JS runtime, or as a portable WASI 0.2 component under any stock wasip2 host.
+Vera compiles to WebAssembly. The same `.wasm` runs at the command line (via [wasmtime](https://wasmtime.dev/)) and in the browser (wrapped in a self-contained JS runtime); WASI 0.2 is a separate portable component built from the same source.
 
 ### Command line
 
@@ -728,6 +822,7 @@ def main() -> int:
         "sitemap.xml": build_sitemap_xml(),
         "index.md": build_index_md(version),
         "SKILL.md": build_skill_md(),
+        "implementation-status.md": build_impl_status(),
     }
     DOCS.mkdir(parents=True, exist_ok=True)
     for name, content in files.items():
