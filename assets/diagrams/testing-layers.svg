@@ -65,7 +65,7 @@
     <rect class="card" x="530" y="216" width="354" height="46" rx="10"/>
     <rect x="530.5" y="216.5" width="4" height="45" rx="2" fill="#d4952a"/>
     <text class="m t" x="548" y="236" font-size="12px">verify</text>
-    <text class="f d" x="548" y="252">…and contracts are proved or guarded</text>
+    <text class="f d" x="548" y="252">…and contracts are proved, guarded, or disclosed</text>
   </g>
   <g>
     <rect class="card" x="560" y="270" width="324" height="46" rx="10"/>

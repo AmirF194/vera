@@ -391,14 +391,15 @@ The refinement on `SafeDiv`'s **second** parameter serves as the contract. The c
 
 A fully Tier 1-verified program has the strongest guarantee: if it compiles, the contracts hold for all inputs. A program with Tier 3 contracts may fail at runtime if the contracts are violated.
 
-The compiler reports a summary after compilation:
+`vera verify` reports a one-line summary:
 
 ```
-Verification summary:
-  12 contracts verified statically (Tier 1)
-   1 contract checked at runtime (Tier 3)
-   0 assumptions (assume statements)
+$ vera verify tests/conformance/ch06_assert_assume.vera
+OK: tests/conformance/ch06_assert_assume.vera
+Verification: 8 verified (Tier 1), 3 runtime checks (Tier 3)
 ```
+
+That program contains an `assume` statement, and the summary does not mention it: assumptions reach no tier and are counted nowhere (see the table below). The warning this chapter requires for every `assume` is not emitted either — tracked in [#1345](https://github.com/aallan/vera/issues/1345).
 
 ### 6.8.1 Obligation Vocabulary
 

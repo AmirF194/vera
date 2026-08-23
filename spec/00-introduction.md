@@ -14,7 +14,7 @@ The name comes from the Latin *veritas* (truth). In Vera, verification is a firs
 
 2. **Explicitness over convenience.** All state changes are declared. All effects are typed. All function contracts are mandatory. There is no implicit behaviour for the model to infer or hallucinate.
 
-3. **One canonical form.** Every construct has one preferred surface spelling: no style choices, no optional syntax, and no equivalent alternatives, unless an explicitly documented distinction changes typing or semantics. Every accepted program has exactly one formatted representation — `vera fmt` is a function of the parse, and formatting is idempotent.
+3. **One canonical form.** Every construct has one preferred surface spelling: no style choices, no optional syntax, and no equivalent alternatives, unless an explicitly documented distinction changes typing or semantics. Every accepted program has exactly one formatted representation, and formatting is idempotent.
 
 4. **Structural references over names.** Bindings are referenced by type and positional index (`@T.n`), not by arbitrary names. This eliminates naming consistency errors — one of the most common failure modes when models generate code across large contexts.
 
@@ -130,7 +130,7 @@ All diagnostic commands support a `--json` flag that produces machine-readable s
 
 ### 0.5.5 Canonical Formatting
 
-The `vera fmt` command enforces Design Goal 3 (one canonical form) by normalising source code to a single textual representation. Two programs with the same parse — comments included, since they are retained positionally — have identical `vera fmt` output, and formatting is idempotent: `fmt(fmt(p)) == fmt(p)`. This eliminates style variation as a source of ambiguity in LLM training and generation.
+The `vera fmt` command enforces Design Goal 3 (one canonical form) by normalising source code to a single textual representation. Two programs with the same parse — comments and blank-line placement included, since both are retained positionally — have identical `vera fmt` output, and formatting is idempotent: `fmt(fmt(p)) == fmt(p)`. This eliminates style variation as a source of ambiguity in LLM training and generation.
 
 ### 0.5.6 Contract-Driven Testing
 

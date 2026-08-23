@@ -277,7 +277,7 @@
       <p class="thesis">The biggest problem models face isn't syntax &mdash; it's coherence over scale. Models are pattern matchers optimising for local plausibility, not architects holding the entire system in mind.</p>
       <p>The <a href="https://arxiv.org/abs/2307.12488">empirical literature</a> shows models are particularly vulnerable to naming-related errors: choosing misleading names, reusing names incorrectly, and losing track of which name refers to which value. Vera addresses this by making everything explicit and verifiable.</p>
       <p>The model doesn't need to be right. It needs to be <em>checkable</em>. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.</p>
-      <img src="loop-web.svg" alt="The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component." width="828" height="188" loading="lazy" style="width:100%;max-width:860px;height:auto;display:block;margin:2.25rem auto">
+      <img src="loop-web.svg" alt="The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, guards most of the rest at runtime, and discloses what it can neither prove nor guard; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component." width="828" height="188" loading="lazy" style="width:100%;max-width:860px;height:auto;display:block;margin:2.25rem auto">
       <p style="margin-top:1.5rem">For deeper questions about the design &mdash; why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka &mdash; see the <a href="https://github.com/aallan/vera/blob/main/FAQ.md">FAQ</a>.</p>
     </div>
   </section>
@@ -287,7 +287,7 @@
     <div class="col col-wide">
       <div class="eyebrow"><span class="slot">@section.02</span> · the syntax is the argument</div>
       <h2>What Vera Looks Like</h2>
-      <p class="lead">Nothing is implicit. The signature declares types, preconditions, postconditions, and effects. The compiler verifies the contract via SMT solver. Division by zero is not a runtime error &mdash; it is a type error.</p>
+      <p class="lead">Nothing is implicit. The signature declares types, preconditions, postconditions, and effects. The compiler verifies the contract via SMT solver. A zero divisor the verifier can witness is a compile error (<code>E526</code>), not a runtime crash.</p>
 
       <div class="sample">
         <div class="code">
@@ -300,7 +300,7 @@
 }</pre>
         </div>
         <aside class="aside">
-          <strong>Read the slots.</strong> <code>@Int.1</code> is the first parameter, <code>@Int.0</code> is the second &mdash; De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The <code>requires</code> clause is what lifts divide-by-zero from a runtime crash to a compile-time error. <a href="https://github.com/aallan/vera/blob/main/examples/safe_divide.vera">examples/safe_divide.vera</a>.
+          <strong>Read the slots.</strong> <code>@Int.1</code> is the first parameter, <code>@Int.0</code> is the second &mdash; De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The <code>requires</code> clause is what discharges the divisor obligation: with it the division proves at compile time; without it the compiler refuses the program with <code>E526</code> and a counterexample, and only a divisor it can neither prove non-zero nor witness a zero for falls to a runtime guard. <a href="https://github.com/aallan/vera/blob/main/examples/safe_divide.vera">examples/safe_divide.vera</a>.
         </aside>
       </div>
 

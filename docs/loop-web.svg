@@ -1,5 +1,5 @@
 <svg width="828" height="188" viewBox="18 58 828 188" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
-  <title id="title">The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong, the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold, it ships as one .wasm for CLI and browser, or a WASI component.</title>
+  <title id="title">The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, guards most of the rest at runtime, and discloses what it can neither prove nor guard; when it's wrong, the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold, it ships as one .wasm for CLI and browser, or a WASI component.</title>
   <!-- Website design system (docs/index.html): paper #FFECD1 · ink #1A0B00/#5E2C08/#975526 ·
        flame #E05600 accent · JetBrains Mono / Inter · transparent bg, 2px strokes, one accent.
        Markers use markerUnits="userSpaceOnUse" so head stroke weight == line weight. -->
@@ -28,7 +28,7 @@
   <!-- the compiler proves -->
   <rect x="330" y="70" width="280" height="64" rx="32" fill="#E05600"/>
   <text class="mono big" x="470" y="108" text-anchor="middle" fill="#FFECD1">the compiler proves</text>
-  <text class="sans sub" x="470" y="158" text-anchor="middle">every type · contracts proved or guarded</text>
+  <text class="sans sub" x="470" y="158" text-anchor="middle">every type · contracts proved, guarded, or disclosed</text>
   <line class="edge" x1="610" y1="102" x2="652" y2="102" marker-end="url(#warr)"/>
 
   <!-- it ships -->

@@ -4,7 +4,7 @@ This document walks through Vera's key features with working code examples. Ever
 
 ## Contracts the compiler proves
 
-`requires(@Int.1 != 0)` means this function cannot be called with a zero divisor. The compiler checks every call site to prove the precondition holds. If it cannot prove it, the code does not compile. Division by zero is not a runtime error — it is a type error.
+`requires(@Int.1 != 0)` means this function cannot be called with a zero divisor. The compiler checks every call site to prove the precondition holds. If it cannot prove it, the code does not compile: a divisor the verifier can witness as zero is an `E526` compile error with a counterexample, and only a divisor it can neither prove non-zero nor witness a zero for falls to a runtime guard.
 
 ```vera
 public fn safe_divide(@Int, @Int -> @Int)

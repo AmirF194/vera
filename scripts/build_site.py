@@ -450,6 +450,7 @@ def build_sitemap_xml() -> str:
         (f"{SITE}/llms.txt", "0.8", "weekly"),
         (f"{SITE}/llms-full.txt", "0.8", "weekly"),
         (f"{SITE}/index.md", "0.5", "weekly"),
+        (f"{SITE}/implementation-status.md", "0.5", "weekly"),
     ]
     url_entries = []
     for loc, priority, freq in urls:
@@ -508,13 +509,13 @@ The [empirical literature](https://arxiv.org/abs/2307.12488) shows models are pa
 
 The model doesn't need to be right. It needs to be *checkable*. Names are replaced by structural references. Contracts are mandatory. Effects are typed. Every function is a specification the compiler verifies against its implementation.
 
-![The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, and guards the rest at runtime; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component.]({SITE}/loop-web.svg)
+![The loop: the model writes Vera with mandatory contracts; the compiler type-checks every program, proves supported contract obligations via Z3, guards most of the rest at runtime, and discloses what it can neither prove nor guard; when it's wrong the diagnostics return — description, rationale, fix, spec_ref — and when the proofs hold it ships as one .wasm for CLI and browser, or a WASI component.]({SITE}/loop-web.svg)
 
 For deeper questions about the design — why no variable names, what gets verified, how Vera compares to Dafny, Lean, and Koka — see the [FAQ]({RAW}/FAQ.md).
 
 ## What Vera Looks Like
 
-Nothing is implicit. The signature declares types, preconditions, postconditions, and effects. The compiler verifies the contract via SMT solver. Division by zero is not a runtime error — it is a type error.
+Nothing is implicit. The signature declares types, preconditions, postconditions, and effects. The compiler verifies the contract via SMT solver. A zero divisor the verifier can witness is a compile error (`E526`), not a runtime crash.
 
 ```vera
 public fn safe_divide(@Int, @Int -> @Int)
@@ -526,7 +527,7 @@ public fn safe_divide(@Int, @Int -> @Int)
 }}
 ```
 
-Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The `requires` clause is what lifts divide-by-zero from a runtime crash to a compile-time error. [examples/safe_divide.vera]({REPO}/blob/main/examples/safe_divide.vera).
+Read the slots: `@Int.1` is the first parameter, `@Int.0` is the second — De Bruijn indexing, most-recent first. No local variable names means no local naming bug is possible — references are type-directed and positional. The `requires` clause is what discharges the divisor obligation: with it the division proves at compile time; without it the compiler refuses the program with `E526` and a counterexample, and only a divisor it can neither prove non-zero nor witness a zero for falls to a runtime guard. [examples/safe_divide.vera]({REPO}/blob/main/examples/safe_divide.vera).
 
 ```vera
 public fn fizzbuzz(@Nat -> @String)
@@ -663,7 +664,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 1. **Checkability over correctness** — Code the compiler can mechanically check. Every diagnostic carries a concrete fix in natural language.
 2. **Explicitness over convenience** — All state changes declared. All effects typed. All contracts mandatory. No implicit behaviour.
-3. **One canonical form** — one preferred spelling per construct, one formatted representation per program. `vera fmt` settles it.
+3. **One canonical form** — One preferred spelling per construct, one formatted representation per program. `vera fmt` settles it.
 4. **Structural references over names** — Bindings referenced by type and positional index (`@T.n`), not arbitrary names.
 5. **Contracts as the source of truth** — Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness** — Fewer valid programs means fewer opportunities for the model to be wrong.
