@@ -48,7 +48,7 @@ from vera.obligations.core import (
     expr_text_for,
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
-from vera.slots import fn_slot_scope, slot_table
+from vera.slots import effect_op_result_names, fn_slot_scope, slot_table
 from vera.smt import (
     CalleeScope,
     SlotEnv,
@@ -2333,24 +2333,44 @@ class ContractVerifier:
         # monomorphized against the correct module's decl.
         seed: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
 
-        def walk_seed(node: object) -> None:
+        # #1310: mirrors codegen's HandleExpr merge in
+        # `_collect_shadowed_qualified_calls`, keeping this walk in lockstep.
+        def walk_seed(
+            node: object, op_result_types: dict[str, str] | None = None,
+        ) -> None:
+            if op_result_types is None:
+                op_result_types = {}
+            if isinstance(node, ast.HandleExpr):
+                for child in (node.effect, node.state, node.clauses):
+                    walk_seed(child, op_result_types)
+                merged = {
+                    **op_result_types,
+                    **effect_op_result_names([node.effect]),
+                }
+                walk_seed(node.body, merged)
+                return
             if (isinstance(node, ast.ModuleCall)
                     and tuple(node.path) in shadowed
                     and node.name in shadowed[tuple(node.path)]):
                 decl = shadowed[tuple(node.path)][node.name]
-                type_args = mono._infer_type_args_from_args(
-                    decl, node.args, ctor_to_adt, None,
-                )
+                saved_ops = mono._op_result_types
+                mono._op_result_types = op_result_types
+                try:
+                    type_args = mono._infer_type_args_from_args(
+                        decl, node.args, ctor_to_adt, None,
+                    )
+                finally:
+                    mono._op_result_types = saved_ops
                 if type_args is not None:
                     seed.add((tuple(node.path), node.name, type_args))
             if isinstance(node, ast.Node):
                 for f in ast_fields(node):
                     if f.name == "span":
                         continue
-                    walk_seed(getattr(node, f.name))
+                    walk_seed(getattr(node, f.name), op_result_types)
             elif isinstance(node, (tuple, list)):
                 for item in node:
-                    walk_seed(item)
+                    walk_seed(item, op_result_types)
 
         for tld in program.declarations:
             decl = tld.decl
