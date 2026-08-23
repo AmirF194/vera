@@ -393,7 +393,7 @@ A fully Tier 1-verified program has the strongest guarantee: if it compiles, the
 
 `vera verify` reports a one-line summary:
 
-```
+```text
 $ vera verify tests/conformance/ch06_assert_assume.vera
 OK: tests/conformance/ch06_assert_assume.vera
 Verification: 8 verified (Tier 1), 3 runtime checks (Tier 3)
@@ -410,7 +410,7 @@ Every obligation this chapter describes ends in exactly one of the first four st
 | **proved** | `verified` | Tier 1. Z3 discharged the obligation; it holds for every input. Counted in `tier1_verified`. |
 | **runtime-guarded** | `tier3`, `timeout` | Tier 3. Not proved, but the compiler emitted a guard that traps on violation. Counted in `tier3_runtime`. |
 | **unguarded** | `tier3_unguarded` | Neither proved nor guarded. Reported as a warning (`E504`, `E506`, `E531`) and counted in no tier. |
-| **refuted** | `violated` | Z3 found a counterexample. A compile error (`E500`, `E501`, `E502`, `E505`, …), counted in no tier. |
+| **refuted or unprovable** | `violated` | The obligation did not discharge and the compiler refuses the program. Two ways in: Z3 returned a concrete counterexample, or — for a call precondition over an opaque value (Section 6.4.2) — it could not establish the goal at all. Both report `violated`, which is why the diagnostic says a call *may* violate the precondition rather than that it does. A compile error (`E500`, `E501`, `E502`, `E505`, …), counted in no tier. |
 | **assumed** | — | An `assume` statement (Section 6.2.6), not an obligation: the fact is taken on trust rather than discharged, so it reaches no tier and is counted nowhere. It is an unsound escape hatch. |
 | **tested** | — | `vera test` generates inputs from the contracts and runs them through WASM. A distinct activity rather than a tier: it samples inputs, it does not quantify over them. |
 | **specified, not implemented** | — | Carried by the `Status:` callouts in this specification and collected in the [implementation-status appendix](../docs/implementation-status.md). |

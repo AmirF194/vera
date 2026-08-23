@@ -130,7 +130,7 @@ All diagnostic commands support a `--json` flag that produces machine-readable s
 
 ### 0.5.5 Canonical Formatting
 
-The `vera fmt` command enforces Design Goal 3 (one canonical form) by normalising source code to a single textual representation. Two programs with the same parse — comments and blank-line placement included, since both are retained positionally — have identical `vera fmt` output, and formatting is idempotent: `fmt(fmt(p)) == fmt(p)`. This eliminates style variation as a source of ambiguity in LLM training and generation.
+The `vera fmt` command enforces Design Goal 3 (one canonical form) by normalising source code to a single textual representation. Two programs with the same parse — comments and blank-line placement included, since both affect the formatted output — have identical `vera fmt` output, and formatting is idempotent: `fmt(fmt(p)) == fmt(p)`. This eliminates style variation as a source of ambiguity in LLM training and generation.
 
 ### 0.5.6 Contract-Driven Testing
 
