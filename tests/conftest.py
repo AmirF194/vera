@@ -16,12 +16,16 @@ import pytest
 def _default_z3_budget():  # type: ignore[no-untyped-def]
     """Scrub an inherited ``VERA_Z3_TIMEOUT_MS`` from every test (#1350).
 
-    The budget is resolved from the environment when no caller passes one
-    (``vera/smt.py::resolve_timeout_ms``), so a developer who exports the
-    variable silently re-measures every tier assertion in the suite against
-    a different solver budget: at ``VERA_Z3_TIMEOUT_MS=1`` the corpus pin in
+    The budget is resolved from the environment only when no caller passes
+    one (``vera/smt.py::resolve_timeout_ms``), so a developer who exports the
+    variable silently re-measures every tier assertion that does NOT name its
+    own budget: at ``VERA_Z3_TIMEOUT_MS=1`` the corpus pin in
     ``test_verifier_adt_decreases.py`` reports 408 statically instead of 411,
-    and the per-function pins in ``test_examples_ephemeris.py`` fail too.  The
+    and the eccentricity pin in ``test_examples_ephemeris.py`` fails too.  An
+    explicit ``timeout_ms=`` outranks the environment, so the budget-
+    parametrised cells in that same file are unaffected either way — which is
+    why one test there fails under a hostile value rather than all of them.
+    The
     documented premise those tests carry — and that TESTING.md states for the
     published totals — is "the default budget, with the variable unset", so
     the scrub reproduces it rather than approximating it with a hardcoded

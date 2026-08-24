@@ -574,7 +574,7 @@ How Vera language features (by spec chapter) map to test files and example progr
 
 ## Test Helpers
 
-Each test module defines its own module-level helper functions rather than sharing them through `conftest.py`, which carries only session-scoped fixtures — opt-in JS coverage, and the `VERA_Z3_TIMEOUT_MS` scrub that keeps every tier assertion measuring the default solver budget (#1350).  The
+Each test module defines its own module-level helper functions rather than sharing them through `conftest.py`, which carries only session-scoped fixtures — opt-in JS coverage, and the `VERA_Z3_TIMEOUT_MS` scrub that stops tier assertions inheriting an ambient solver budget, so the ones that do not name a budget of their own measure the default (#1350) — an explicit `timeout_ms=` outranks the environment and was never exposed.  The
 three split suites are the exception: the `test_checker_*.py` files (split from
 `test_checker.py`, #420) import their shared helpers from
 `tests/checker_helpers.py`; the `test_codegen_*.py` feature files (split from
