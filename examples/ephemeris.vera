@@ -57,17 +57,28 @@
 -- WHAT VERIFIES, AND WHAT DOES NOT
 -- =============================================================================
 --
--- Of 51 proof obligations, 49 discharge at Tier 1 and 2 fall to Tier 3.  Unlike
+-- Of 49 proof obligations, 47 discharge at Tier 1 and 2 fall to Tier 3.  Unlike
 -- every other example in the tree, this one does not verify uniformly -- and the
 -- split is the most interesting thing in the file.
 --
--- One caveat on that count.  A third obligation -- the result bound on
--- `julian_century` -- proves in roughly nine to eleven seconds, which straddles
--- the default ten-second solver budget, so on a slower or busier machine it
--- lands at Tier 3 and the count reads 48/3.  That is a property of the host,
--- not of this program: `vera verify --timeout-ms 60000` (or
--- `VERA_Z3_TIMEOUT_MS`) proves it either way.  The two below are different in
--- kind -- no budget reaches them.
+-- The two that do not are categorical, not marginal: no solver budget reaches
+-- them, and nothing about this file's arrangement could.  That distinction is
+-- worth the paragraph it costs, because the first draft of this program did not
+-- have it.  The `Ecc` bound used to be inherited from refined `Julian` and
+-- `Century` types -- saying "this date is inside the element set's window" in
+-- the type, and letting the verifier carry that through a division chain to the
+-- eccentricity.  It worked, and it cost about nine to eleven seconds against a
+-- ten-second default budget, which meant the reported tier depended on how busy
+-- the machine was.  A verification result that changes with the load average is
+-- not a verification result.
+--
+-- So the bound is established where the value is built instead.  `earth_elements`
+-- and `mars_elements` guard the eccentricity with exactly the `Ecc` predicate,
+-- so the then-branch discharges by path condition and the else-branch by
+-- constant folding -- three comparisons rather than a division chain, and the
+-- whole file verifies in under a second.  `Julian` and `Century` are plain
+-- aliases again, which is the honest shape: the date types were carrying a
+-- proof obligation about eccentricity, which was never really their business.
 --
 -- The arithmetic spine proves: Julian-day arithmetic, the angle normaliser's
 -- [0, 360) range, the eccentricity bound, and the sexagesimal rendering.
@@ -108,14 +119,9 @@
 -- =============================================================================
 
 -- Distinct aliases partition the slot index space.  See the header.
--- Julian and Century are refinements, not plain aliases: the JPL element set is
--- only valid 1800-2050, and saying so in the type is what lets the verifier
--- discharge the eccentricity bound downstream.  Without it, `earth_elements`
--- cannot prove its `Ecc` field is an ellipse -- the solver correctly objects
--- that at T = 9.9 billion centuries the linear rate takes e out of range.
-type Julian = { @Float64 | @Float64.0 >= 2378000.0 && @Float64.0 <= 2470000.0 };
+type Julian = Float64;  -- Julian Day number
 
-type Century = { @Float64 | @Float64.0 >= -2.1 && @Float64.0 <= 0.6 };
+type Century = Float64;  -- Julian centuries from J2000.0
 
 type Deg = Float64;  -- angle, degrees
 
@@ -245,7 +251,22 @@ private fn earth_elements(@Century -> @Elements)
   effects(pure)
 {
   let @Deg = wrap_deg(100.46457166 + 35999.37244981 * @Century.0 - (102.93768193 + 0.32327364 * @Century.0), 400);
-  Elements(1.00000261 + 0.00000562 * @Century.0, 0.01671123 - 0.00004392 * @Century.0, -0.00001531 - 0.01294668 * @Century.0, @Deg.0, 102.93768193 + 0.32327364 * @Century.0, 0.0)
+  -- The eccentricity is bounded at construction rather than inherited from a
+  -- refined date type.  The guard condition is EXACTLY the `Ecc` predicate, so
+  -- the then-branch discharges by path condition and the else-branch by
+  -- constant folding -- the shape `E505`'s own diagnostic recommends.  NaN
+  -- takes the else branch (`NaN >= 0.0` is false), which is the case a bare
+  -- `float_clamp` cannot cover: WASM min/max propagate NaN, so a clamped value
+  -- still fails an ellipse bound the solver must prove.
+  -- Earth's e stays within a few parts in 10^5 of 0.0167 across 1800-2050, so
+  -- the fallback never fires for a date this element set covers.
+  let @Float64 = 0.01671123 - 0.00004392 * @Century.0;
+  let @Ecc = if @Float64.0 >= 0.0 && @Float64.0 < 1.0 then {
+    @Float64.0
+  } else {
+    0.01671123
+  };
+  Elements(1.00000261 + 0.00000562 * @Century.0, @Ecc.0, -0.00001531 - 0.01294668 * @Century.0, @Deg.0, 102.93768193 + 0.32327364 * @Century.0, 0.0)
 }
 
 private fn mars_elements(@Century -> @Elements)
@@ -254,7 +275,21 @@ private fn mars_elements(@Century -> @Elements)
   effects(pure)
 {
   let @Deg = wrap_deg(-4.55343205 + 19140.30268499 * @Century.0 - (-23.94362959 + 0.44441088 * @Century.0), 400);
-  Elements(1.52371034 + 0.00001847 * @Century.0, 0.0933941 + 0.00007882 * @Century.0, 1.84969142 - 0.00813131 * @Century.0, @Deg.0, -23.94362959 + 0.44441088 * @Century.0, 49.55953891 - 0.29257343 * @Century.0)
+  -- The eccentricity is bounded at construction rather than inherited from a
+  -- refined date type.  The guard condition is EXACTLY the `Ecc` predicate, so
+  -- the then-branch discharges by path condition and the else-branch by
+  -- constant folding -- the shape `E505`'s own diagnostic recommends.  NaN
+  -- takes the else branch (`NaN >= 0.0` is false), which is the case a bare
+  -- `float_clamp` cannot cover: WASM min/max propagate NaN, so a clamped value
+  -- still fails an ellipse bound the solver must prove.
+  -- Mars's e stays within a few parts in 10^5 of 0.0934 across the same span.
+  let @Float64 = 0.0933941 + 0.00007882 * @Century.0;
+  let @Ecc = if @Float64.0 >= 0.0 && @Float64.0 < 1.0 then {
+    @Float64.0
+  } else {
+    0.0933941
+  };
+  Elements(1.52371034 + 0.00001847 * @Century.0, @Ecc.0, 1.84969142 - 0.00813131 * @Century.0, @Deg.0, -23.94362959 + 0.44441088 * @Century.0, 49.55953891 - 0.29257343 * @Century.0)
 }
 
 -- =============================================================================

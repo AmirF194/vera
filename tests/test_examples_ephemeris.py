@@ -181,6 +181,33 @@ class TestEphemerisExample:
 class TestEphemerisVerification:
     """The example's contracts land in the tiers its header claims."""
 
+    def test_eccentricity_bounds_prove_at_tier_1(self, obligations: list) -> None:
+        """The `Ecc` bounds are PROVED, and cheaply — the construction story.
+
+        `earth_elements` and `mars_elements` guard the eccentricity with
+        exactly the `Ecc` predicate, so the then-branch discharges by path
+        condition and the else-branch by constant folding.  That replaced an
+        earlier design which inherited the bound from refined `Julian` /
+        `Century` types and carried it through a division chain: correct, but
+        it cost ~9-11 s against the 10 s default budget, so the reported tier
+        depended on machine load.
+
+        Pinning these two as VERIFIED is what stops that regressing.  If the
+        guard is loosened, or the date types are re-refined and the bound goes
+        back through the division, this test still passes only while the proof
+        stays cheap enough to land — and the corpus pin in
+        `test_verifier_adt_decreases.py` runs at the DEFAULT budget precisely
+        so a return to the expensive shape shows up as a failure rather than
+        as flakiness.
+        """
+        binds = [o for o in obligations if o.kind == "refine_bind"]
+        assert len(binds) == 2, [
+            (o.fn_name, o.kind, o.status) for o in binds
+        ]
+        assert all(o.status == "verified" for o in binds), [
+            (o.fn_name, o.status) for o in binds
+        ]
+
     def test_wrap_deg_proves_at_tier_1(self, obligations: list) -> None:
         """`wrap_deg`'s [0, 360) range is PROVED, not runtime-checked.
 

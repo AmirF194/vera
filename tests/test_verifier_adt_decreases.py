@@ -478,12 +478,13 @@ private fn sum(@List<Int> -> @Int)
         postcondition the verifier discharged statically; the user-defined
         `magnitude`/`larger` shed it, so one obligation moves T1 -> T3.  Net:
         -1 T1, +1 T3, +0 total: 271/81/352 -> 270/82/352.
-        * 413/122/535 after `ephemeris.vera` (#143) contributed 49 T1 +
-          2 T3 + 51 contracts.  The two T3s are the `ensures` clauses of
+        * 411/122/533 after `ephemeris.vera` (#143) contributed 47 T1 +
+          2 T3 + 49 contracts.  The two T3s are the `ensures` clauses of
           `vec_norm` and `declination`, each standing on the far side of a
           `sqrt` or an `asin` — float builtins are opaque to the solver by
-          design, so the claims are runtime-guarded rather than proved.
-          Net: +49 T1, +2 T3, +51 total, +0 t3u.
+          design, so the claims are runtime-guarded rather than proved, and
+          no solver budget reaches them.  Net: +47 T1, +2 T3, +49 total,
+          +0 t3u.
         """
         t1 = t3 = total = t3u = 0
         for f in sorted(EXAMPLES_DIR.glob("*.vera")):
@@ -500,16 +501,16 @@ private fn sum(@List<Int> -> @Int)
             _diags, artifacts = typecheck_with_artifacts(
                 prog, text, file=str(f), resolved_modules=resolved,
             )
-            # #1350: an explicit, generous budget.  `ephemeris.vera`'s
-            # `julian_century` refine_bind proves in ~9-11 s, which straddles
-            # the 10 s default — so under the default this corpus-wide count
-            # is a property of host speed and process warmth, not of the
-            # programs: measured 413 T1 cold and 412 T1 after one prior
-            # verification in the same process.  At 60 s it is 413/122/535
-            # cold and warm alike (2x each).  The pin measures the corpus;
-            # the budget's own behaviour is pinned in test_verifier_budget.py.
+            # The DEFAULT budget, deliberately.  This pin briefly carried an
+            # explicit 60 s because `ephemeris.vera` had an obligation proving
+            # in ~9-11 s against the 10 s default, which made the count a
+            # property of host speed.  That obligation is gone — the example
+            # bounds its eccentricity at construction now, rather than deriving
+            # it through a division chain — so every obligation in the corpus
+            # sits far from any plausible budget and the pin measures the
+            # programs rather than the machine.  Verified flip-free across
+            # [500 ms, 20 s], warm and cold (#1350).
             result = verify(prog, text, file=str(f),
-                            timeout_ms=60_000,
                             resolved_modules=resolved,
                             expr_types=artifacts.expr_semantic_types,
                             expr_target_types=artifacts.expr_target_types)
@@ -670,10 +671,10 @@ private fn sum(@List<Int> -> @Int)
         # +5 T1, -5 T3, +0 total: 359/125/484 -> 364/120/484.
         #
         # #143: `ephemeris.vera`, the first floating-point example, adds
-        # 49 T1 + 2 T3: 364/120/484 -> 413/122/535.
-        assert t1 == 413, f"Expected 413 T1, got {t1}"
+        # 47 T1 + 2 T3: 364/120/484 -> 411/122/533.
+        assert t1 == 411, f"Expected 411 T1, got {t1}"
         assert t3 == 122, f"Expected 122 T3, got {t3}"
-        assert total == 535, f"Expected 535 total, got {total}"
+        assert total == 533, f"Expected 533 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 
