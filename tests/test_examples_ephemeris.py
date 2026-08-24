@@ -76,12 +76,40 @@ def obligations(source: str) -> list:
     play, so it is module-scoped rather than repeated per test.
     """
     ast = parse_to_ast(source)
-    _diags, arts = typecheck_with_artifacts(ast, source)
+    diags, arts = typecheck_with_artifacts(ast, source)
+    # A type error makes every downstream obligation meaningless -- the stream
+    # would still be produced, and the tier pins below would then be asserting
+    # things about a program that does not compile.  Fail here instead, where
+    # the message names the real cause.
+    errors = [d for d in diags if d.severity == "error"]
+    assert not errors, (
+        "ephemeris.vera failed to type-check, so its obligation stream is "
+        f"meaningless: {[(d.error_code, d.description) for d in errors]}"
+    )
     result = verify(
         ast,
         source,
         expr_types=arts.expr_semantic_types,
         expr_target_types=arts.expr_target_types,
+    )
+    return list(result.obligations)
+
+
+def _obligations_at_budget(source: str, timeout_ms: int) -> list:
+    """The obligation stream re-derived under an explicit solver budget."""
+    ast = parse_to_ast(source)
+    diags, arts = typecheck_with_artifacts(ast, source)
+    errors = [d for d in diags if d.severity == "error"]
+    assert not errors, (
+        "ephemeris.vera failed to type-check, so its obligation stream is "
+        f"meaningless: {[(d.error_code, d.description) for d in errors]}"
+    )
+    result = verify(
+        ast,
+        source,
+        expr_types=arts.expr_semantic_types,
+        expr_target_types=arts.expr_target_types,
+        timeout_ms=timeout_ms,
     )
     return list(result.obligations)
 
@@ -199,8 +227,21 @@ class TestEphemerisVerification:
         `test_verifier_adt_decreases.py` runs at the DEFAULT budget precisely
         so a return to the expensive shape shows up as a failure rather than
         as flakiness.
+
+        The guard's else branch is verification-side coverage only: the
+        published element sets keep e near 0.0167 and 0.0934, so it is
+        provably unreachable at run time and no execution test can cover it.
+        That is the point of proving the bound rather than testing it.
         """
         binds = [o for o in obligations if o.kind == "refine_bind"]
+        # WHOSE binds, not just how many.  A count-and-status pin passes
+        # unchanged if the guard is deleted from one element function and an
+        # unrelated refined bind appears elsewhere -- same arity, same
+        # statuses, different program.  Naming the two functions is what makes
+        # the pin about the construction story rather than about arithmetic.
+        assert {o.fn_name for o in binds} == {
+            "earth_elements", "mars_elements"
+        }, [(o.fn_name, o.kind, o.status) for o in binds]
         assert len(binds) == 2, [
             (o.fn_name, o.kind, o.status) for o in binds
         ]
@@ -247,7 +288,12 @@ class TestEphemerisVerification:
             if o.fn_name == "declination" and o.kind == "ensures"
         ]
         assert dec, "no ensures obligation recorded for declination"
-        assert all(o.status != "verified" for o in dec), [
+        # EXACTLY `tier3` -- the categorical `asin` demotion, runtime-guarded.
+        # `!= "verified"` would also accept `tier3_unguarded` (the guard was
+        # lost, and nothing checks the range at run time either) and `timeout`
+        # (the obligation stopped being categorical and is now merely slow).
+        # Both are regressions this pin exists to catch.
+        assert all(o.status == "tier3" for o in dec), [
             (o.kind, o.status) for o in dec
         ]
 
@@ -259,6 +305,35 @@ class TestEphemerisVerification:
         assert all(o.status == "verified" for o in ra), [
             (o.kind, o.status) for o in ra
         ]
+
+    @pytest.mark.parametrize("budget_ms", [1_000, 10_000, 60_000])
+    def test_transcendentals_stay_tier_3_at_any_budget(
+        self, source: str, budget_ms: int
+    ) -> None:
+        """The two Tier-3s are CATEGORICAL, which is a different claim.
+
+        The example's header says "no solver budget reaches them", and the
+        sibling test above only shows they are Tier 3 at the default.  A claim
+        about every budget needs more than one budget, so this re-verifies at
+        a smaller and a much larger one.  Being budget-parameterised, it also
+        cannot flake the way a wall-clock assertion would: nothing here
+        measures elapsed time, only which tier the solver lands on.
+
+        `sqrt` and `asin` are opaque to the SMT translation by design, so more
+        time cannot help.  Exact `tier3` matters in both directions:
+        `verified` at 60 s would falsify the header, and `timeout` would mean
+        the demotion had stopped being categorical and become merely slow.
+        """
+        obligations = _obligations_at_budget(source, budget_ms)
+        opaque = {
+            o.fn_name: o.status
+            for o in obligations
+            if o.fn_name in ("vec_norm", "declination") and o.kind == "ensures"
+        }
+        assert opaque == {
+            "vec_norm": "tier3",
+            "declination": "tier3",
+        }, (budget_ms, opaque)
 
     def test_kepler_solve_termination_proves(self, obligations: list) -> None:
         """The `decreases` metric on the Newton-Raphson loop is discharged.

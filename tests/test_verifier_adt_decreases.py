@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 413 T1 / 122 T3 / 535 total (current).
+        """All examples together: 411 T1 / 122 T3 / 533 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -486,6 +486,9 @@ private fn sum(@List<Int> -> @Int)
           no solver budget reaches them.  Net: +47 T1, +2 T3, +49 total,
           +0 t3u.
         """
+        # The DEFAULT budget is the premise: `conftest.py`'s autouse
+        # `_default_z3_budget` scrubs an inherited VERA_Z3_TIMEOUT_MS so this
+        # loop measures what TESTING.md publishes.
         t1 = t3 = total = t3u = 0
         for f in sorted(EXAMPLES_DIR.glob("*.vera")):
             text = f.read_text(encoding="utf-8")

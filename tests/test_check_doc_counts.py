@@ -1087,6 +1087,43 @@ class TestFaqExampleCount:
         assert len(errors) == 1
         assert "not found" in errors[0]
 
+    def test_prose_decoy_before_the_bullet_is_ignored(self) -> None:
+        """The BULLET is read, not the first matching phrase on the page.
+
+        An unanchored search takes whichever occurrence comes first, so prose
+        above the list validates instead of the bullet — and the check stays
+        green while the bullet itself is stale.  Here the decoy carries the
+        correct count and the bullet carries a wrong one: an unanchored
+        implementation passes, an anchored one reports the bullet.
+        """
+        text = (
+            "Vera ships 43 working example programs today, and the list "
+            "below breaks the project down.\n"
+            "\n"
+            "- A 14-chapter formal specification\n"
+            "- 42 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert "doc says 42" in errors[0], errors
+
+    def test_a_second_bullet_is_an_error(self) -> None:
+        """Two bullets mean two answers; the check cannot pick one."""
+        text = (
+            "- 43 working example programs\n"
+            "- 43 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert "appears 2 times" in errors[0], errors
+
+    def test_indented_or_inline_mention_is_not_the_bullet(self) -> None:
+        """Only a top-level list item counts as the by-the-numbers bullet."""
+        text = "Some prose about 43 working example programs in passing.\n"
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
     def test_the_shipped_faq_is_consistent(self) -> None:
         """The real page, against the real corpus."""
         root = _SCRIPT.parent.parent

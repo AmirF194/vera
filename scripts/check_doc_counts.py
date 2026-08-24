@@ -1103,13 +1103,27 @@ def check_faq_example_count(faq_text: str, live_examples: int) -> list[str]:
     disable the check and reopen the blind spot one level up.
     """
     errors: list[str] = []
-    m = re.search(r"([\d,]+) working example programs", faq_text)
-    if not m:
+    # Anchored to the by-the-numbers BULLET, not to the phrase.  An unanchored
+    # search takes the first occurrence anywhere in the page, so prose above
+    # the list that happens to say "N working example programs" would be
+    # validated instead of the bullet -- the check would then be green while
+    # the bullet itself was stale.  Zero matches and MULTIPLE matches are both
+    # errors: a second bullet means the page has two answers and this function
+    # cannot say which one the reader believes.
+    found = re.findall(
+        r"^- ([\d,]+) working example programs\s*$", faq_text, re.MULTILINE
+    )
+    if not found:
         return [
-            "FAQ.md: example-count line"
-            " ('N working example programs') not found"
+            "FAQ.md: example-count bullet"
+            " ('- N working example programs') not found"
         ]
-    doc_examples = int(m.group(1).replace(",", ""))
+    if len(found) > 1:
+        return [
+            f"FAQ.md: example-count bullet appears {len(found)} times"
+            f" ({', '.join(found)}); expected exactly one"
+        ]
+    doc_examples = int(found[0].replace(",", ""))
     if doc_examples != live_examples:
         errors.append(
             f"FAQ.md: example count: doc says {doc_examples},"

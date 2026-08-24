@@ -40,11 +40,6 @@ from vera.verifier import ContractVerifier, verify
 
 ROOT = Path(__file__).parent.parent
 EXAMPLES = ROOT / "examples"
-EPHEMERIS = EXAMPLES / "ephemeris.vera"
-
-# Comfortably above the ~9-11 s the boundary obligation needs, so the
-# measurement is of the program rather than of the machine.
-GENEROUS_MS = 60_000
 
 
 class TestBudgetResolution:
@@ -155,6 +150,31 @@ class TestCliFlag:
         out = r.stderr + r.stdout
         assert Z3_TIMEOUT_ENV in out
         assert "Traceback" not in out
+
+    @pytest.mark.parametrize(
+        "command", ["lsp", "version", "builtins", "effects", "errors"]
+    )
+    def test_no_file_commands_reject_the_flag(self, command: str) -> None:
+        """The refusal must precede the commands that take no file argument.
+
+        These dispatch early in `main()`, before the file-argument handling,
+        so a refusal placed with the other flag parsing never runs for them:
+        `vera lsp --timeout-ms 5000` would start the language server and
+        ignore the flag, which is the silent no-op the refusal exists to
+        prevent.  `lsp` is the one that matters most — it blocks until the
+        client disconnects, so the ignored flag is invisible.
+        """
+        r = self._run([command, "--timeout-ms", "5000"])
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "--timeout-ms" in (r.stderr + r.stdout)
+
+    @pytest.mark.parametrize("command", ["version", "builtins"])
+    def test_no_file_commands_are_unaffected_without_the_flag(
+        self, command: str
+    ) -> None:
+        """The guard must not disturb their ordinary path."""
+        r = self._run([command])
+        assert r.returncode == 0, (r.returncode, r.stderr)
 
     def test_a_stray_environment_value_does_not_break_compile(self) -> None:
         """`compile` never builds a solver, so it must be unaffected."""

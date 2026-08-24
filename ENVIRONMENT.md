@@ -88,8 +88,7 @@ remove.
 **When to use it.**  The budget decides more than how long a run takes.  An
 obligation whose proof lands near it is Tier 1 on a fast machine and Tier 3
 on a slow or busy one, which makes the tier a property of the host rather
-than of the program — `examples/ephemeris.vera` has one such obligation,
-proving in roughly nine to eleven seconds.  Raising the budget is therefore
+than of the program.  Raising the budget is therefore
 the way to read a Tier 3 correctly: if it becomes Tier 1, the claim only
 needed more time; if it stays, the solver cannot see through it at all.
 Float arithmetic in postconditions is where this bites, costing roughly an
