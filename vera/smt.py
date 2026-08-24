@@ -347,8 +347,12 @@ def resolve_timeout_ms(explicit: int | str | None = None) -> int:
     if explicit is not None:
         return _validated_budget(explicit, "timeout_ms")
     raw = os.environ.get(Z3_TIMEOUT_ENV)
-    if raw is None or not raw.strip():
+    if raw is None:
         return DEFAULT_Z3_TIMEOUT_MS
+    # An empty or whitespace-only value is SET, so it is malformed rather
+    # than absent: defaulting there would be exactly the silent fallback
+    # this function refuses everywhere else.  `int('')` raises, so the
+    # ordinary validator already reports it as a non-integer.
     return _validated_budget(raw.strip(), Z3_TIMEOUT_ENV)
 
 

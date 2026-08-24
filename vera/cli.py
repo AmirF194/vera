@@ -1890,6 +1890,27 @@ def main() -> None:
                 print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    if "--timeout-ms" in args and command != "verify":
+        # #1350: the flag is verify-only by design — `verify` is the
+        # measurement surface.  `test` and the language server consult the
+        # budget too, but reach it through VERA_Z3_TIMEOUT_MS; every other
+        # command never builds a solver at all.  Accepting the flag there
+        # and ignoring it would be the silent-no-op the knob exists to
+        # avoid, so it is refused by name.
+        msg = (
+            f"--timeout-ms is only accepted by `vera verify`, not "
+            f"`vera {command}`. Set VERA_Z3_TIMEOUT_MS in the environment "
+            f"to reach `vera test` and the language server."
+        )
+        if use_json:
+            print(json.dumps({"ok": False, "file": "",
+                              "diagnostics": [{"severity": "error",
+                                               "description": msg}]},
+                             indent=2))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
     if "--timeout-ms" in args:
         tm_idx = args.index("--timeout-ms")
         raw_tm = args[tm_idx + 1] if tm_idx + 1 < len(args) else None

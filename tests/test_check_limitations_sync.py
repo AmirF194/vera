@@ -207,3 +207,27 @@ class TestIssueColumnScoping:
             wide |= _MOD.extract_limitation_table_issues(text, header)
         assert not (narrow & prose_only), sorted(narrow & prose_only)
         assert prose_only <= wide, sorted(prose_only - wide)
+
+    def test_done_and_open_extractor_scopes_too(self) -> None:
+        """`extract_done_and_open` carries the same two widths (#1337).
+
+        `vera/README.md`'s Current Limitations table is the third source
+        the state scan reads, and it has its own extractor.  A fix that
+        threaded the flag through the other two and forgot this one would
+        leave the same prose-as-inventory defect live for that file, so
+        both widths are pinned here as well.
+        """
+        text = (
+            "## Current Limitations\n\n"
+            "| Limitation | Issue |\n"
+            "|------------|-------|\n"
+            f"| Superseded by {_link(self.CLOSED_N)}. | {_link(self.OPEN_N)} |\n"
+        )
+        narrow_open, narrow_done = _MOD.extract_done_and_open(
+            text, issue_column_only=True
+        )
+        wide_open, wide_done = _MOD.extract_done_and_open(text)
+        assert narrow_open == {self.OPEN_N}
+        assert self.CLOSED_N not in narrow_open
+        assert wide_open == {self.OPEN_N, self.CLOSED_N}
+        assert narrow_done == set() and wide_done == set()

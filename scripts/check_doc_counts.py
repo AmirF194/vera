@@ -1092,6 +1092,32 @@ def bug_rows(known_issues_text: str) -> list[int] | None:
     return numbers or None
 
 
+def check_faq_example_count(faq_text: str, live_examples: int) -> list[str]:
+    """FAQ.md's by-the-numbers example bullet against the live count.
+
+    The same list's TEST bullet was already pinned, and its CONFORMANCE
+    bullet before that — each added only after the unpinned half had
+    drifted.  The example bullet went stale the same way, so it is pinned
+    here rather than left as the third instance of one lesson.  A missing
+    pattern is an error, not a skip: rewording the line would otherwise
+    disable the check and reopen the blind spot one level up.
+    """
+    errors: list[str] = []
+    m = re.search(r"([\d,]+) working example programs", faq_text)
+    if not m:
+        return [
+            "FAQ.md: example-count line"
+            " ('N working example programs') not found"
+        ]
+    doc_examples = int(m.group(1).replace(",", ""))
+    if doc_examples != live_examples:
+        errors.append(
+            f"FAQ.md: example count: doc says {doc_examples},"
+            f" live is {live_examples}"
+        )
+    return errors
+
+
 def check_bug_rows(known_issues_text: str) -> list[str]:
     """Check the Bugs table's shape: one well-formed, unique issue per row."""
     numbers = bug_rows(known_issues_text)
@@ -1672,6 +1698,8 @@ def main() -> int:
                 f"FAQ.md: tests count: doc says {doc_tests},"
                 f" live is {live_total_tests}"
             )
+
+    errors.extend(check_faq_example_count(faq_md, live_examples))
 
     # ------------------------------------------------------------------
     # 13. Check docs/index.html status block

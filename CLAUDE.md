@@ -97,7 +97,7 @@ See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the CLI cookbook — driving the toolchai
 
 - `spec/` — Language specification (Chapters 0-13)
 - `vera/` — Reference compiler: grammar, parser, AST, transformer, type checker, verifier, codegen, CLI
-- `examples/` — 42 example Vera programs (all must pass `vera check` and `vera verify`)
+- `examples/` — 43 example Vera programs (all must pass `vera check` and `vera verify`)
 - `tests/` — Test suite (unit tests + conformance suite)
 - `tests/conformance/` — 244 conformance programs validating every language feature against the spec
 - `scripts/` — CI and validation scripts

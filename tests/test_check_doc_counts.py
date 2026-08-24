@@ -1049,3 +1049,47 @@ class TestErrorCodesCount:
         text = "The ERROR_CODES dict has 160 entries."
         errors = _MOD.check_error_codes_count(text, self._registry())
         assert len(errors) == 1 and "could not find" in errors[0]
+
+
+class TestFaqExampleCount:
+    """FAQ.md's by-the-numbers example bullet (#1346 review).
+
+    The page's conformance bullet was pinned first, then its test bullet
+    after that one drifted through two releases.  The example bullet went
+    stale the same way when the corpus grew to 43, so it is pinned too —
+    the third instance of one lesson, and the reason the check errors on a
+    MISSING pattern rather than skipping.
+    """
+
+    def _faq(self, n: str) -> str:
+        return (
+            "- A 14-chapter formal specification\n"
+            "- 12,188 tests, including a 244-program conformance suite\n"
+            f"- {n} working example programs\n"
+            "- 164 built-in functions\n"
+        )
+
+    def test_matching_count_is_clean(self) -> None:
+        assert _MOD.check_faq_example_count(self._faq("43"), 43) == []
+
+    def test_stale_count_is_reported(self) -> None:
+        errors = _MOD.check_faq_example_count(self._faq("42"), 43)
+        assert len(errors) == 1
+        assert "doc says 42" in errors[0] and "live is 43" in errors[0]
+
+    def test_thousands_separator_is_parsed(self) -> None:
+        assert _MOD.check_faq_example_count(self._faq("1,043"), 1043) == []
+
+    def test_missing_line_is_an_error_not_a_skip(self) -> None:
+        """Rewording the bullet must not silently disable the check."""
+        text = "- A 14-chapter formal specification\n- 43 examples, reworded\n"
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
+    def test_the_shipped_faq_is_consistent(self) -> None:
+        """The real page, against the real corpus."""
+        root = _SCRIPT.parent.parent
+        faq = (root / "FAQ.md").read_text(encoding="utf-8")
+        live = len(list((root / "examples").glob("*.vera")))
+        assert _MOD.check_faq_example_count(faq, live) == []

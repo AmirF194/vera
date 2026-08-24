@@ -25,10 +25,11 @@ import sys
 from pathlib import Path
 
 import pytest
+import z3
 
-from vera.checker.core import typecheck, typecheck_with_artifacts
+from vera.checker.core import typecheck
+from vera.obligations.session import VerificationSession
 from vera.parser import parse_to_ast
-from vera.resolver import ModuleResolver
 from vera.smt import (
     DEFAULT_Z3_TIMEOUT_MS,
     Z3_TIMEOUT_ENV,
@@ -63,14 +64,14 @@ class TestBudgetResolution:
         monkeypatch.setenv(Z3_TIMEOUT_ENV, "45000")
         assert resolve_timeout_ms(7_000) == 7_000
 
-    def test_blank_environment_falls_back(
+    def test_unset_environment_falls_back(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An empty value is "unset", not "malformed"."""
-        monkeypatch.setenv(Z3_TIMEOUT_ENV, "   ")
+        """Only an ABSENT variable is "nobody chose"."""
+        monkeypatch.delenv(Z3_TIMEOUT_ENV, raising=False)
         assert resolve_timeout_ms() == DEFAULT_Z3_TIMEOUT_MS
 
-    @pytest.mark.parametrize("bad", ["abc", "0", "-5", "1.5"])
+    @pytest.mark.parametrize("bad", ["abc", "0", "-5", "1.5", "", "   "])
     def test_malformed_environment_raises(
         self, monkeypatch: pytest.MonkeyPatch, bad: str
     ) -> None:
@@ -162,60 +163,103 @@ class TestCliFlag:
         assert r.returncode == 0, r.stderr
 
 
-def _verify_ephemeris(timeout_ms: int):
-    text = EPHEMERIS.read_text(encoding="utf-8")
-    prog = parse_to_ast(text)
-    resolved = ModuleResolver(_root=EPHEMERIS.parent).resolve_imports(
-        prog, EPHEMERIS
-    )
-    _diags, art = typecheck_with_artifacts(
-        prog, text, file=str(EPHEMERIS), resolved_modules=resolved,
-    )
-    return verify(prog, text, file=str(EPHEMERIS), resolved_modules=resolved,
-                  expr_types=art.expr_semantic_types,
-                  expr_target_types=art.expr_target_types,
-                  timeout_ms=timeout_ms)
+class TestBudgetReachesTheSolver:
+    """PLUMBING: the resolved budget arrives at the Z3 solver's parameters.
 
-
-class TestBoundaryObligationRegression:
-    """The defect that motivated the knob, pinned at a generous budget.
-
-    `julian_century`'s refine_bind is the obligation that straddled the
-    default.  Warming the process is what tipped it before: a single prior
-    verification was enough to move the corpus count by one.
+    Deliberately introspective rather than timed.  A test that asserted a
+    contract proves within N seconds measures the machine, which is the
+    defect this knob exists to remove — it would fail on a loaded CI worker
+    for the same reason the hardcoded budget did.  Spying on
+    ``z3.Solver.set`` instead answers the only question the knob owns: does
+    the number a caller chose reach the solver?
     """
 
-    def _julian_century_status(self, result) -> list[str]:
-        return [
-            o.status for o in result.obligations
-            if o.fn_name == "julian_century" and o.kind == "refine_bind"
-        ]
+    def _timeouts_set(self, fn) -> list[int]:
+        """Every ``("timeout", n)`` the solver received while *fn* ran."""
+        seen: list[int] = []
+        original = z3.Solver.set
 
-    def test_proves_cold_at_a_generous_budget(self) -> None:
-        statuses = self._julian_century_status(_verify_ephemeris(GENEROUS_MS))
-        assert statuses == ["verified"], statuses
+        def spy(self_, *args, **kwargs):
+            if len(args) >= 2 and args[0] == "timeout":
+                seen.append(args[1])
+            kwargs_timeout = kwargs.get("timeout")
+            if kwargs_timeout is not None:
+                seen.append(kwargs_timeout)
+            return original(self_, *args, **kwargs)
 
-    def test_proves_warm_at_a_generous_budget(self) -> None:
-        """The warming step is the one that used to flip it."""
-        list_ops = EXAMPLES / "list_ops.vera"
-        text = list_ops.read_text(encoding="utf-8")
-        prog = parse_to_ast(text)
-        typecheck(prog, text)
-        verify(prog, text, file=str(list_ops))
+        z3.Solver.set = spy  # type: ignore[method-assign]
+        try:
+            fn()
+        finally:
+            z3.Solver.set = original  # type: ignore[method-assign]
+        return seen
 
-        statuses = self._julian_century_status(_verify_ephemeris(GENEROUS_MS))
-        assert statuses == ["verified"], statuses
+    # A tiny program: this asks where the budget went, not what was proved.
+    SOURCE = (
+        "public fn f(@Int -> @Int)\n"
+        "  requires(true)\n"
+        "  ensures(true)\n"
+        "  effects(pure)\n"
+        "{\n"
+        "  @Int.0\n"
+        "}\n"
+    )
 
-    def test_the_two_opaque_contracts_stay_tier_3_at_any_budget(self) -> None:
-        """More time cannot help a claim behind `sqrt` / `asin`.
+    def _cold(self, **kwargs) -> None:
+        prog = parse_to_ast(self.SOURCE)
+        typecheck(prog, self.SOURCE)
+        verify(prog, self.SOURCE, **kwargs)
 
-        This is the control: it separates "needed more time" from "the
-        solver cannot see through the builtin at all", which is what the
-        example's header claims about these two and not about the third.
+    def test_explicit_argument_reaches_the_solver_cold(self) -> None:
+        seen = self._timeouts_set(lambda: self._cold(timeout_ms=33_000))
+        assert seen, "the solver was never given a timeout"
+        assert set(seen) == {33_000}, seen
+
+    def test_environment_reaches_the_solver_cold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(Z3_TIMEOUT_ENV, "27000")
+        seen = self._timeouts_set(lambda: self._cold())
+        assert set(seen) == {27_000}, seen
+
+    def test_default_reaches_the_solver_cold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(Z3_TIMEOUT_ENV, raising=False)
+        seen = self._timeouts_set(lambda: self._cold())
+        assert set(seen) == {DEFAULT_Z3_TIMEOUT_MS}, seen
+
+    def test_explicit_argument_reaches_the_solver_warm(self) -> None:
+        """The warm session builds its own context — same budget, same place."""
+        def run() -> None:
+            session = VerificationSession(timeout_ms=41_000)
+            session.verify_source(self.SOURCE, file="budget_warm.vera")
+        seen = self._timeouts_set(run)
+        assert set(seen) == {41_000}, seen
+
+    def test_environment_reaches_the_solver_warm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(Z3_TIMEOUT_ENV, "23000")
+
+        def run() -> None:
+            session = VerificationSession()
+            session.verify_source(self.SOURCE, file="budget_warm.vera")
+        seen = self._timeouts_set(run)
+        assert set(seen) == {23_000}, seen
+
+    def test_warm_and_cold_agree_on_the_budget_they_apply(self) -> None:
+        """The oracle's property, at the plumbing level.
+
+        A warm session and a cold verify given the same budget must hand the
+        solver the same number — if they diverged here, warm/cold tier
+        equality would be luck rather than a property.
         """
-        result = _verify_ephemeris(GENEROUS_MS)
-        opaque = {
-            o.fn_name: o.status for o in result.obligations
-            if o.fn_name in ("vec_norm", "declination") and o.kind == "ensures"
-        }
-        assert opaque == {"vec_norm": "tier3", "declination": "tier3"}, opaque
+        cold_seen = self._timeouts_set(lambda: self._cold(timeout_ms=17_000))
+
+        def run_warm() -> None:
+            VerificationSession(timeout_ms=17_000).verify_source(
+                self.SOURCE, file="budget_warm.vera"
+            )
+        warm_seen = self._timeouts_set(run_warm)
+        assert set(cold_seen) == set(warm_seen) == {17_000}, (cold_seen, warm_seen)
