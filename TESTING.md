@@ -666,7 +666,7 @@ An example that parses, type-checks, verifies and compiles can still trap the in
 | Compilation to WASM | `scripts/check_e602_clean.py` — it exists to police `[E602]`/`[E604]` silent skips, but it compiles every example with `--json` and treats an `ok: false` envelope as a hard failure, so full compile coverage is real though incidental to the script's name | all 43 |
 | Execution under both runtimes | `tests/test_browser.py`, from two explicit lists — `EXAMPLES_WITH_MAIN` (10, compared on stdout) and `FUNCTION_CALL_EXAMPLES` (11 distinct examples, compared on return value) | 21 |
 | Execution with pinned output | dedicated tests, each asserting a specific value or rendering (see the table) | 12 |
-| Execution asserted trap-free | `scripts/check_examples_run.py` — the harness gate | 34 |
+| Execution asserted trap-free | `scripts/check_examples_run.py` — the harness gate | 35 |
 
 The gate is what makes the set closed. It enumerates `examples/*.vera` from disk and requires every name to be either run or matched to a documented skip property, so **an unclassified example fails the gate** and adding an example forces the author to classify it. The table below is cross-checked against the script's own tables on every run: a row that disagrees, a missing row, or a renamed example is an error, on the same principle as `check_doc_counts.py` — the codebase is the oracle and the documentation must match it.
 
