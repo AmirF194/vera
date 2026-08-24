@@ -1704,9 +1704,12 @@ Options:
     --wat                Print WAT text instead of writing .wasm binary
     --fn <name>          Function to execute or test
     --trials <n>         Number of test trials (default: 100, for vera test)
-    --timeout-ms <n>     Per-query Z3 budget in ms (default: 10000, for vera
-                         verify).  VERA_Z3_TIMEOUT_MS sets it for vera test
-                         and the language server, which take no such flag
+    --timeout-ms <n>     Per-query Z3 budget in ms, accepted by vera verify.
+                         Precedence: this flag, then VERA_Z3_TIMEOUT_MS, then
+                         the 10000 default -- so the variable is also verify's
+                         fallback when the flag is absent, and it is the only
+                         route for vera test and the language server, which
+                         take no such flag
     --port <n>           Port to serve on (default: 8000, for vera serve)
     --host <h>           Host/interface to bind (default: 127.0.0.1, for vera serve)
     -o <path>            Output path for .wasm binary (or directory for --target browser)
