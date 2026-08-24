@@ -14,7 +14,7 @@ Vera reads a small set of `VERA_*` environment variables.  This document is the 
 | [`VERA_INFERENCE_MODEL`](#explicit-provider--model-overrides) | Override the provider's default model | runtime | optional |
 | [`VERA_DB_URL`](#vera_db_url) | Database connection for the `DB` effect | runtime | optional (defaults to `sqlite::memory:`) |
 | [`VERA_JS_COVERAGE`](#vera_js_coverage) | Opt-in V8 coverage during browser-parity tests | dev / CI | optional |
-| [`VERA_Z3_TIMEOUT_MS`](#vera_z3_timeout_ms) | Per-query Z3 budget in milliseconds — raises or lowers the Tier 1 / Tier 3 boundary | verify / test | optional (defaults to `10000`) |
+| [`VERA_Z3_TIMEOUT_MS`](#vera_z3_timeout_ms) | Per-query Z3 budget in milliseconds — raises or lowers the Tier 1 / Tier 3 boundary | verify / test / language server | optional (defaults to `10000`) |
 | [`VERA_EAGER_GC`](#vera_eager_gc) | Force `$gc_collect` on every allocation — debugging knob for GC-rooting bugs | compile-time (dev) | optional |
 | [`VERA_DEBUG_HOST_ERRORS`](#vera_debug_host_errors) | Re-raise a host callback's original exception instead of converting it — debugging knob for host-binding bugs | runtime (dev) | optional |
 
@@ -88,11 +88,19 @@ remove.
 **When to use it.**  The budget decides more than how long a run takes.  An
 obligation whose proof lands near it is Tier 1 on a fast machine and Tier 3
 on a slow or busy one, which makes the tier a property of the host rather
-than of the program.  Raising the budget is therefore
-the way to read a Tier 3 correctly: if it becomes Tier 1, the claim only
-needed more time; if it stays, the solver cannot see through it at all.
-Float arithmetic in postconditions is where this bites, costing roughly an
-order of magnitude more solver time than the integer equivalent.
+than of the program.  Raising the budget is therefore the way to read a
+Tier 3 correctly: if it becomes Tier 1, the claim only needed more time.
+
+If it stays Tier 3, the run itself says which of two things happened, and
+the distinction matters — no finite budget can establish that no budget
+would.  A `timeout` status means the solver was still working when the
+budget expired: undecided at this budget, and a larger one may yet prove it.
+A `tier3` status means the obligation was never handed to the solver as a
+decidable goal — a claim standing behind `sqrt` or `asin`, outside the
+translated fragment — and no budget reaches that.  `vera verify --json`
+reports the status per obligation, so the two are distinguishable without
+guessing.  Float arithmetic in postconditions is where this bites, costing
+roughly an order of magnitude more solver time than the integer equivalent.
 
 Read by `vera/smt.py::resolve_timeout_ms`, at the seams that construct a
 solver (`verify()`, `ContractVerifier`, and the LSP's `VerificationSession`),

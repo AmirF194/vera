@@ -1124,6 +1124,25 @@ class TestFaqExampleCount:
         assert len(errors) == 1
         assert "not found" in errors[0]
 
+    def test_an_indented_bullet_is_not_the_bullet(self) -> None:
+        """A nested list item is a sub-point, not the headline figure.
+
+        `re.MULTILINE`'s `^` anchors at the line start, so leading
+        whitespace already disqualifies it — this pins that, because an
+        unanchored search would happily read the indented count and report
+        the page as consistent while the real bullet said something else.
+        """
+        text = (
+            "- Project size:\n"
+            "  - 43 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert errors[0] == (
+            "FAQ.md: example-count bullet"
+            " ('- N working example programs') not found"
+        ), errors
+
     def test_the_shipped_faq_is_consistent(self) -> None:
         """The real page, against the real corpus."""
         root = _SCRIPT.parent.parent

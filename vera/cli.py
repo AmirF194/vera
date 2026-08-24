@@ -1681,7 +1681,7 @@ Commands:
     parse                Parse a .vera file and print the parse tree
     check [--json|--quiet|--explain-slots]       Parse and type-check a .vera file
     typecheck [--json|--quiet|--explain-slots]   Same as check (explicit alias)
-    verify [--json|--quiet]      Parse, type-check, and verify contracts
+    verify [--json|--quiet|--timeout-ms n]   Parse, type-check, and verify contracts
     test [--json]        Test contracts via Z3-guided input generation
     compile [--wat]      Compile a .vera file to WebAssembly
     compile --target browser  Emit browser bundle (wasm + JS + HTML)
@@ -1704,6 +1704,9 @@ Options:
     --wat                Print WAT text instead of writing .wasm binary
     --fn <name>          Function to execute or test
     --trials <n>         Number of test trials (default: 100, for vera test)
+    --timeout-ms <n>     Per-query Z3 budget in ms (default: 10000, for vera
+                         verify).  VERA_Z3_TIMEOUT_MS sets it for vera test
+                         and the language server, which take no such flag
     --port <n>           Port to serve on (default: 8000, for vera serve)
     --host <h>           Host/interface to bind (default: 127.0.0.1, for vera serve)
     -o <path>            Output path for .wasm binary (or directory for --target browser)
