@@ -664,7 +664,7 @@ Full source and data: [{REPO}-bench]({REPO}-bench).
 
 1. **Checkability over correctness** — Code the compiler can mechanically check. Every diagnostic carries a concrete fix in natural language.
 2. **Explicitness over convenience** — All state changes declared. All effects typed. All contracts mandatory. No implicit behaviour.
-3. **One canonical form** — One preferred spelling per construct, one formatted representation per program. `vera fmt` settles it.
+3. **One canonical form** — One preferred spelling per construct; formatting is deterministic and idempotent. `vera fmt` settles it.
 4. **Structural references over names** — Bindings referenced by type and positional index (`@T.n`), not arbitrary names.
 5. **Contracts as the source of truth** — Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness** — Fewer valid programs means fewer opportunities for the model to be wrong.

@@ -8,7 +8,7 @@ Technical decisions, rationale, and prior art. For the design philosophy and FAQ
 
 1. **Checkability over correctness.** Code that can be mechanically checked. When wrong, the compiler provides a natural language explanation of the error with a concrete fix — an instruction, not a status report.
 2. **Explicitness over convenience.** All state changes declared. All effects typed. All function contracts mandatory. No implicit behaviour.
-3. **One canonical form.** One preferred spelling per construct, one formatted representation per program. No style choices.
+3. **One canonical form.** One preferred spelling per construct; for a given parse, formatting is deterministic and idempotent. No style choices.
 4. **Structural references over names.** Bindings referenced by type and positional index (`@T.n`), not arbitrary names. See [`DE_BRUIJN.md`](DE_BRUIJN.md).
 5. **Contracts as the source of truth.** Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness.** Fewer valid programs means fewer opportunities for the model to be wrong.
