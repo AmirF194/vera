@@ -23,6 +23,9 @@ Usage:
     vera test      <file.vera>              Test contracts via Z3-guided inputs
     vera test      --json <file.vera>       Test with JSON output
     vera test      --trials 50 <file.vera>  Set trial count (default 100)
+    vera verify    --timeout-ms N <file.vera>  Per-query Z3 budget in ms
+                                            (default 10000; also
+                                            VERA_Z3_TIMEOUT_MS)
     vera test      --fn name <file.vera>    Test a specific function
     vera serve     <file.vera>              Serve handle(Request -> Response) over HTTP
     vera serve     --port 8080 <file.vera>  Serve on a specific port (default 8000)
@@ -262,10 +265,12 @@ def cmd_check(
         return 1
 
 
-def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
+def cmd_verify(path: str, as_json: bool = False, quiet: bool = False,
+               timeout_ms: int | None = None) -> int:
     """Parse, transform, type-check, and verify a .vera file."""
     from vera.checker import typecheck_with_artifacts
     from vera.resolver import ModuleResolver
+    from vera.smt import resolve_timeout_ms
     from vera.verifier import verify
 
     try:
@@ -303,6 +308,7 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
 
         # Then verify contracts
         result = verify(ast, source, file=str(p),
+                        timeout_ms=timeout_ms,
                         resolved_modules=resolved,
                         expr_types=artifacts.expr_semantic_types,
                         expr_target_types=artifacts.expr_target_types)
@@ -322,6 +328,11 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False) -> int:
                     "tier1_verified": s.tier1_verified,
                     "tier3_runtime": s.tier3_runtime,
                     "total": s.total,
+                    # #1350: the budget these tiers were measured under.  A
+                    # tier near the budget is host-sensitive, so a summary
+                    # that does not say which budget produced it cannot be
+                    # compared against another machine's.
+                    "timeout_ms": resolve_timeout_ms(timeout_ms),
                 },
                 # #967: expose the reified obligation stream the summary is
                 # derived from, so a machine consumer can reproduce or refine
@@ -1859,6 +1870,44 @@ def main() -> None:
         host_idx = args.index("--host")
         if host_idx + 1 < len(args):
             serve_host = args[host_idx + 1]
+    from vera.smt import Z3BudgetError, resolve_timeout_ms
+
+    timeout_ms: int | None = None
+    # #1350: resolve once, here, so a malformed budget is a clean CLI error
+    # rather than a traceback out of the solver's construction seam.  Only
+    # the commands that verify consult it — `compile`/`run` never build a
+    # solver, so a stray env var must not fail them.
+    if command in ("verify", "test"):
+        try:
+            resolve_timeout_ms()
+        except Z3BudgetError as exc:
+            if use_json:
+                print(json.dumps({"ok": False, "file": "",
+                                  "diagnostics": [{"severity": "error",
+                                                   "description": str(exc)}]},
+                                 indent=2))
+            else:
+                print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if "--timeout-ms" in args:
+        tm_idx = args.index("--timeout-ms")
+        raw_tm = args[tm_idx + 1] if tm_idx + 1 < len(args) else None
+        try:
+            if raw_tm is None:
+                raise Z3BudgetError("--timeout-ms: missing value")
+            timeout_ms = resolve_timeout_ms(raw_tm)
+        except Z3BudgetError as exc:
+            msg = str(exc).replace("timeout_ms:", "--timeout-ms:", 1)
+            if use_json:
+                print(json.dumps({"ok": False, "file": "",
+                                  "diagnostics": [{"severity": "error",
+                                                   "description": msg}]},
+                                 indent=2))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            sys.exit(1)
+
     if "--trials" in args:
         trials_idx = args.index("--trials")
         if trials_idx + 1 < len(args):
@@ -1934,7 +1983,8 @@ def main() -> None:
 
     # Remove flags from remaining args to find the filepath
     skip_flags = {"--json", "--quiet", "--wat", "--write", "--check", "--explain-slots"}
-    skip_next = {"--fn", "-o", "--trials", "--target", "--port", "--host", "--world"}
+    skip_next = {"--fn", "-o", "--trials", "--target", "--port", "--host",
+                 "--world", "--timeout-ms"}
     remaining: list[str] = []
     i = 1  # skip command
     while i < len(args):
@@ -1963,7 +2013,8 @@ def main() -> None:
             explain_slots=use_explain_slots,
         ))
     elif command == "verify":
-        sys.exit(cmd_verify(filepath, as_json=use_json, quiet=use_quiet))
+        sys.exit(cmd_verify(filepath, as_json=use_json, quiet=use_quiet,
+                            timeout_ms=timeout_ms))
     elif command == "test":
         sys.exit(cmd_test(
             filepath, as_json=use_json, trials=trials, fn_name=fn_name

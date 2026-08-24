@@ -106,3 +106,104 @@ class TestCheckStatesFailsLoud:
         # surface as None rather than "" — guard both streams.
         out = (result.stdout or "") + (result.stderr or "")
         assert "could not be determined" in out
+
+
+class TestIssueColumnScoping:
+    """#1337 — the state scan reads a row's Issue column, not its prose.
+
+    ``--check-states`` asks an INVENTORY question: does this table still
+    claim the issue is open?  A row's prose legitimately cites CLOSED
+    issues for context ("the general disease behind #1315", "fixed in
+    #1305"), and reading those as live claims failed the nightly on
+    eight such citations while every row's own Issue column was correct.
+    The presence checks keep the wide reading, so both widths are tested
+    here — a fix that narrowed BOTH would silently drop cross-reference
+    coverage from the default mode.
+    """
+
+    OPEN_N = 9001
+    CLOSED_N = 9002
+
+    def _table(self, prose_cite: bool) -> str:
+        prose = f" See also {_link(self.CLOSED_N)}." if prose_cite else ""
+        return (
+            "## Bugs\n\n"
+            "| Bug | Issue |\n"
+            "|-----|-------|\n"
+            f"| A defect.{prose} | {_link(self.OPEN_N)} |\n"
+        )
+
+    def test_issue_column_is_collected(self) -> None:
+        """(a) A row whose Issue column cites an issue reports that issue."""
+        got = _MOD.extract_limitation_table_issues(
+            self._table(prose_cite=False), "## Bugs", issue_column_only=True
+        )
+        assert got == {self.OPEN_N}
+
+    def test_a_closed_issue_in_the_issue_column_still_counts(self) -> None:
+        """(b) The check's PURPOSE survives: an Issue column is never exempt.
+
+        Scoping to the column must not become a way for a stale row to
+        escape the state check — only prose loses its vote.
+        """
+        table = (
+            "## Bugs\n\n"
+            "| Bug | Issue |\n"
+            "|-----|-------|\n"
+            f"| A stale row. | {_link(self.CLOSED_N)} |\n"
+        )
+        got = _MOD.extract_limitation_table_issues(
+            table, "## Bugs", issue_column_only=True
+        )
+        assert self.CLOSED_N in got
+
+    def test_prose_citation_is_not_collected(self) -> None:
+        """(c) The #1337 regression: a prose cite does not claim openness."""
+        got = _MOD.extract_limitation_table_issues(
+            self._table(prose_cite=True), "## Bugs", issue_column_only=True
+        )
+        assert got == {self.OPEN_N}
+        assert self.CLOSED_N not in got
+
+    def test_wide_form_still_sees_prose(self) -> None:
+        """(d) Default mode is unchanged — it still counts cross-references."""
+        got = _MOD.extract_limitation_table_issues(
+            self._table(prose_cite=True), "## Bugs"
+        )
+        assert got == {self.OPEN_N, self.CLOSED_N}
+
+    def test_section_extractor_scopes_too(self) -> None:
+        """``extract_section_issues`` carries the same two widths."""
+        text = (
+            "## Known Limitations\n\n"
+            "| Limitation | Issue |\n"
+            "|------------|-------|\n"
+            f"| Blocked by {_link(self.CLOSED_N)}. | {_link(self.OPEN_N)} |\n"
+        )
+        narrow = _MOD.extract_section_issues(
+            text, "Known Limitations", issue_column_only=True
+        )
+        wide = _MOD.extract_section_issues(text, "Known Limitations")
+        assert narrow == {self.OPEN_N}
+        assert wide == {self.OPEN_N, self.CLOSED_N}
+
+    def test_real_known_issues_prose_cites_are_excluded(self) -> None:
+        """The eight live citations that failed the nightly, pinned.
+
+        These are references to issues closed in v0.1.12 that appear ONLY
+        in row prose.  The narrow scan must not see them; the wide scan
+        must, so the pin fails if the scoping is applied to both.
+        """
+        text = (
+            _SCRIPT.parent.parent / "KNOWN_ISSUES.md"
+        ).read_text(encoding="utf-8")
+        prose_only = {1268, 1277, 1281, 1285, 1294, 1304, 1305, 1309}
+        narrow: set[int] = set()
+        wide: set[int] = set()
+        for header in ("## Limitations", "## Bugs"):
+            narrow |= _MOD.extract_limitation_table_issues(
+                text, header, issue_column_only=True
+            )
+            wide |= _MOD.extract_limitation_table_issues(text, header)
+        assert not (narrow & prose_only), sorted(narrow & prose_only)
+        assert prose_only <= wide, sorted(prose_only - wide)

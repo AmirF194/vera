@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 364 T1 / 120 T3 / 484 total (current).
+        """All examples together: 413 T1 / 122 T3 / 535 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -478,6 +478,12 @@ private fn sum(@List<Int> -> @Int)
         postcondition the verifier discharged statically; the user-defined
         `magnitude`/`larger` shed it, so one obligation moves T1 -> T3.  Net:
         -1 T1, +1 T3, +0 total: 271/81/352 -> 270/82/352.
+        * 413/122/535 after `ephemeris.vera` (#143) contributed 49 T1 +
+          2 T3 + 51 contracts.  The two T3s are the `ensures` clauses of
+          `vec_norm` and `declination`, each standing on the far side of a
+          `sqrt` or an `asin` — float builtins are opaque to the solver by
+          design, so the claims are runtime-guarded rather than proved.
+          Net: +49 T1, +2 T3, +51 total, +0 t3u.
         """
         t1 = t3 = total = t3u = 0
         for f in sorted(EXAMPLES_DIR.glob("*.vera")):
@@ -494,7 +500,16 @@ private fn sum(@List<Int> -> @Int)
             _diags, artifacts = typecheck_with_artifacts(
                 prog, text, file=str(f), resolved_modules=resolved,
             )
+            # #1350: an explicit, generous budget.  `ephemeris.vera`'s
+            # `julian_century` refine_bind proves in ~9-11 s, which straddles
+            # the 10 s default — so under the default this corpus-wide count
+            # is a property of host speed and process warmth, not of the
+            # programs: measured 413 T1 cold and 412 T1 after one prior
+            # verification in the same process.  At 60 s it is 413/122/535
+            # cold and warm alike (2x each).  The pin measures the corpus;
+            # the budget's own behaviour is pinned in test_verifier_budget.py.
             result = verify(prog, text, file=str(f),
+                            timeout_ms=60_000,
                             resolved_modules=resolved,
                             expr_types=artifacts.expr_semantic_types,
                             expr_target_types=artifacts.expr_target_types)
@@ -653,9 +668,12 @@ private fn sum(@List<Int> -> @Int)
         # helpers state the values their caller's `ensures` had been asserting
         # about them).  The obligation SET is unchanged, only the tier:
         # +5 T1, -5 T3, +0 total: 359/125/484 -> 364/120/484.
-        assert t1 == 364, f"Expected 364 T1, got {t1}"
-        assert t3 == 120, f"Expected 120 T3, got {t3}"
-        assert total == 484, f"Expected 484 total, got {total}"
+        #
+        # #143: `ephemeris.vera`, the first floating-point example, adds
+        # 49 T1 + 2 T3: 364/120/484 -> 413/122/535.
+        assert t1 == 413, f"Expected 413 T1, got {t1}"
+        assert t3 == 122, f"Expected 122 T3, got {t3}"
+        assert total == 535, f"Expected 535 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

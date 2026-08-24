@@ -101,6 +101,7 @@ vera fmt --check file.vera     # exit non-zero if not already canonical (CI mode
 ```bash
 vera verify file.vera          # type-check + discharge contracts via Z3
 vera verify --json file.vera   # adds a "verification" tier summary
+vera verify --timeout-ms 60000 file.vera   # per-query Z3 budget, ms (default 10000)
 ```
 
 Vera verifies in two implemented tiers, at every call site:

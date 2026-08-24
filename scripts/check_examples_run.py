@@ -3,7 +3,7 @@
 trap-free under the native runtime, or is matched to a documented
 property that excludes it from harness execution.
 
-`scripts/check_examples.py` type-checks and verifies all 42 examples and
+`scripts/check_examples.py` type-checks and verifies all 43 examples and
 `scripts/check_e602_clean.py` compiles them, so an example that fails to
 parse, type-check, verify or compile is caught before this gate.  What
 none of them does is *run* one.  A program can pass every static stage
@@ -165,6 +165,7 @@ RUN_SPECS: dict[str, RunSpec] = {
     # round trip happened.
     "database": RunSpec(expect="database round-trip succeeded"),
     "effect_handler": RunSpec(),
+    "ephemeris": RunSpec(),
     "factorial": RunSpec(fn="factorial", args=("10",)),
     # Writes then reads back a file; a failed write prints the error and
     # completes normally, so the sentinel is what proves the round trip.

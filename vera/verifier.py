@@ -49,7 +49,12 @@ from vera.obligations.core import (
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv, alias_env_from_environment
 from vera.slots import fn_slot_scope, slot_table
-from vera.smt import CalleeScope, SlotEnv, SmtContext
+from vera.smt import (
+    CalleeScope,
+    SlotEnv,
+    SmtContext,
+    resolve_timeout_ms,
+)
 from vera.types import (
     erases_to_unit,
     BOOL,
@@ -183,7 +188,7 @@ def verify(
     program: ast.Program,
     source: str = "",
     file: str | None = None,
-    timeout_ms: int = 10_000,
+    timeout_ms: int | None = None,
     resolved_modules: list[ResolvedModule] | None = None,
     expr_types: dict[tuple[int, int, int, int], Type] | None = None,
     expr_target_types: dict[tuple[int, int, int, int], Type] | None = None,
@@ -215,7 +220,8 @@ def verify(
         if expr_target_types is None:
             expr_target_types = _arts.expr_target_types
     verifier = ContractVerifier(
-        source=source, file=file, timeout_ms=timeout_ms,
+        source=source, file=file,
+        timeout_ms=resolve_timeout_ms(timeout_ms),
         resolved_modules=resolved_modules,
         expr_types=expr_types, expr_target_types=expr_target_types,
     )
@@ -263,7 +269,7 @@ class ContractVerifier:
         self,
         source: str = "",
         file: str | None = None,
-        timeout_ms: int = 10_000,
+        timeout_ms: int | None = None,
         resolved_modules: list[ResolvedModule] | None = None,
         shared_smt: SmtContext | None = None,
         expr_types: dict[tuple[int, int, int, int], Type] | None = None,
@@ -350,7 +356,8 @@ class ContractVerifier:
         self._decl_fn_scope = None
         self.source = source
         self.file = file
-        self.timeout_ms = timeout_ms
+        # #1350: None means "nobody chose", so consult env then default.
+        self.timeout_ms = resolve_timeout_ms(timeout_ms)
         self._resolved_modules: list[ResolvedModule] = (
             resolved_modules or []
         )

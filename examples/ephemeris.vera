@@ -1,0 +1,464 @@
+-- Geocentric ephemeris — the apparent positions of the Sun and Mars on the sky,
+-- computed from Keplerian orbital elements for 2027 February 20.0 TT
+-- (JD 2461456.5), the date of a Mars opposition.
+--
+-- This is the first example in the tree to do floating-point work.  It exercises
+-- the whole float surface — sin, cos, sqrt, atan2, asin, floor, round — and
+-- it is deliberately a *program* rather than a feature demonstration: nine stages
+-- from a calendar date to a formatted right ascension, each one a stage that can
+-- be wrong on its own.
+--
+-- =============================================================================
+-- WHY THIS FILE IS DECOMPOSED THE WAY IT IS
+-- =============================================================================
+--
+-- Vera references bindings by type and position (`@T.n`), not by name, so the
+-- shape of a program's *types* decides how legible its slot references are.
+-- Dense numerical code is the hard case: write it all in bare `@Float64` and a
+-- five-parameter function carries `@Float64.0` through `@Float64.4`, where the
+-- rightmost parameter is index 0 and every new `let` of that type shifts all the
+-- others up by one.  That is the shape SKILL.md's "Keep functions small" section
+-- warns about, and the shape that makes the commutative-operations trap bite:
+-- swapping two indices is invisible for `+` and `*` and silently wrong for `-`,
+-- `/`, and comparisons.
+--
+-- So this file gives every physical quantity its own type.  A type alias gets its
+-- own slot stack — DE_BRUIJN.md §6 is explicit that `type Cnt = Int;` does not
+-- make `@Cnt` and `@Int` interchangeable, and a parameter declared `@Cnt` is
+-- reached only by `@Cnt.0`.  Distinct names therefore *partition* the index
+-- space.  The payoff is visible in `rot_x` below: five parameters, five separate
+-- stacks, every reference at `.0`, and no index left to get wrong.  Run
+-- `vera check --explain-slots examples/ephemeris.vera` to see the resolution
+-- table the compiler builds.
+--
+-- The same trick does the real work inside `Vec3` and `Elements`.  A `Vec3`
+-- holding three `Float64` fields would bind three same-typed slots on every
+-- destructure, with the *last* field at index 0 — precisely the ordering mistake
+-- that turns a coordinate difference into nonsense.  Holding `XAu`, `YAu`, `ZAu`
+-- instead, each component destructures to its own `.0`.
+--
+-- Two aliases are refinement types rather than plain ones, because there the
+-- bound is load-bearing: `Ecc` states an orbit is elliptical, and `wrap_deg`
+-- returns a `Deg` the verifier has *proved* lies in [0, 360).
+--
+-- Where a single function still needs several bindings of one type, the second
+-- documented tool is a `where` helper: DE_BRUIJN.md calls it "a closed,
+-- parameter-rooted scope, the one binding form that does not nest", so it starts
+-- a fresh index space and reaching a parent binding from inside one is E130
+-- rather than a silent capture.  This file mostly does not need them, because
+-- typing the quantities separately removed the collisions first.  That ordering
+-- is the point: decompose by *meaning* and the slot discipline follows.
+--
+-- Further reading: SKILL.md ("Keep functions small", "Iteration"), DE_BRUIJN.md
+-- (the full slot-resolution rules), spec/03-slot-references.md, and
+-- spec/06-contracts.md for the verification tiers referred to below.
+--
+-- =============================================================================
+-- WHAT VERIFIES, AND WHAT DOES NOT
+-- =============================================================================
+--
+-- Of 51 proof obligations, 49 discharge at Tier 1 and 2 fall to Tier 3.  Unlike
+-- every other example in the tree, this one does not verify uniformly -- and the
+-- split is the most interesting thing in the file.
+--
+-- One caveat on that count.  A third obligation -- the result bound on
+-- `julian_century` -- proves in roughly nine to eleven seconds, which straddles
+-- the default ten-second solver budget, so on a slower or busier machine it
+-- lands at Tier 3 and the count reads 48/3.  That is a property of the host,
+-- not of this program: `vera verify --timeout-ms 60000` (or
+-- `VERA_Z3_TIMEOUT_MS`) proves it either way.  The two below are different in
+-- kind -- no budget reaches them.
+--
+-- The arithmetic spine proves: Julian-day arithmetic, the angle normaliser's
+-- [0, 360) range, the eccentricity bound, and the sexagesimal rendering.
+--
+-- The two that do not are `vec_norm` and `declination`.  Vera's float builtins
+-- are opaque to the SMT solver by design (SKILL.md), so a claim standing on the
+-- far side of a `sqrt` or an `asin` cannot be proved and is enforced by a
+-- runtime guard at the function boundary instead.
+--
+-- Compare `right_ascension` and `declination` directly.  Both assert a range on
+-- an angle, both are true by construction, and both are the same shape of claim.
+-- `right_ascension` PROVES, because its value returns through `wrap_deg`, whose
+-- own range is proved, so the chain of evidence is unbroken.  `declination` does
+-- not, because `asin` sits between the claim and the evidence.  Nothing about
+-- the difficulty of the mathematics separates them; only whether a
+-- transcendental intervenes.  That is the tier system doing exactly what it is
+-- specified to do, made visible in a program that does real work.
+--
+-- One limitation is worked around rather than solved.  Refinement types cannot
+-- currently be string-interpolated
+-- ([#1347](https://github.com/aallan/vera/issues/1347)), so every rendered value
+-- goes through an explicit `float_to_string` / `int_to_string` and
+-- `string_concat` rather than "\(...)".  Refinements widen to their base type
+-- for free, which is why the formatting layer below takes plain `@Float64`.
+--
+-- =============================================================================
+-- ACCURACY
+-- =============================================================================
+--
+-- The elements are JPL's low-precision Keplerian set ("Approximate Positions of
+-- the Major Planets"), valid 1800–2050.  Against ERFA's analytic model this
+-- program agrees to 19 arcsec for the Sun and 5 arcsec for Mars — well inside
+-- the arcminute accuracy the element set claims.
+--
+-- Two simplifications are stated rather than hidden.  TT and UTC are conflated
+-- (a ~69 s difference, far below the element set's accuracy), and no correction
+-- is made for light-time, aberration, nutation, or precession from J2000.
+-- =============================================================================
+
+-- Distinct aliases partition the slot index space.  See the header.
+-- Julian and Century are refinements, not plain aliases: the JPL element set is
+-- only valid 1800-2050, and saying so in the type is what lets the verifier
+-- discharge the eccentricity bound downstream.  Without it, `earth_elements`
+-- cannot prove its `Ecc` field is an ellipse -- the solver correctly objects
+-- that at T = 9.9 billion centuries the linear rate takes e out of range.
+type Julian = { @Float64 | @Float64.0 >= 2378000.0 && @Float64.0 <= 2470000.0 };
+
+type Century = { @Float64 | @Float64.0 >= -2.1 && @Float64.0 <= 0.6 };
+
+type Deg = Float64;  -- angle, degrees
+
+type Rad = Float64;  -- angle, radians
+
+type SemiMajor = Float64;  -- semi-major axis, AU
+
+type Incl = Float64;  -- inclination, degrees
+
+type MeanAnom = Float64;  -- mean anomaly, degrees
+
+type EccAnom = Float64;  -- eccentric anomaly, degrees
+
+type ArgPeri = Float64;  -- argument of perihelion, degrees
+
+type LongNode = Float64;  -- longitude of ascending node, degrees
+
+type OrbX = Float64;  -- in-plane coordinate, AU
+
+type OrbY = Float64;  -- in-plane coordinate, AU
+
+type XAu = Float64;  -- ecliptic/equatorial X, AU
+
+type YAu = Float64;  -- ecliptic/equatorial Y, AU
+
+type ZAu = Float64;  -- ecliptic/equatorial Z, AU
+
+-- Refinement, not a plain alias: the bound is the physics.  An eccentricity of
+-- 1 or more is not an ellipse, and `kepler_step` divides by (1 - e*cos E).
+type Ecc = { @Float64 | @Float64.0 >= 0.0 && @Float64.0 < 1.0 };
+
+private data Vec3 {
+  Vec3(XAu, YAu, ZAu)
+}
+
+-- Orbital elements already propagated to a given epoch.  Six fields, six types,
+-- so a destructure yields six independent stacks rather than one six-deep one.
+private data Elements {
+  Elements(SemiMajor, Ecc, Incl, MeanAnom, ArgPeri, LongNode)
+}
+
+-- =============================================================================
+-- Angles
+-- =============================================================================
+
+private fn deg_to_rad(@Deg -> @Rad)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @Deg.0 * 0.017453292519943295
+}
+
+-- Normalise an angle into [0, 360).  The postcondition is PROVED, not checked:
+-- every branch either returns a value already shown to be in range, or recurses
+-- on one closer to it, and the fuel-exhausted branch returns a constant that is.
+-- Angle-wrap bugs are a classic source of silent error in pointing and
+-- navigation code; here the compiler rules one out for all inputs.
+private fn wrap_deg(@Deg, @Nat -> @Deg)
+  requires(true)
+  ensures(@Deg.result >= 0.0 && @Deg.result < 360.0)
+  decreases(@Nat.0)
+  effects(pure)
+{
+  if @Deg.0 >= 0.0 && @Deg.0 < 360.0 then {
+    @Deg.0
+  } else {
+    if @Nat.0 == 0 then {
+      0.0
+    } else {
+      if @Deg.0 >= 360.0 then {
+        wrap_deg(@Deg.0 - 360.0, @Nat.0 - 1)
+      } else {
+        wrap_deg(@Deg.0 + 360.0, @Nat.0 - 1)
+      }
+    }
+  }
+}
+
+-- =============================================================================
+-- Kepler's equation:  M = E - e sin E
+-- =============================================================================
+
+-- One Newton-Raphson step, in degrees.  Three parameters, three stacks, every
+-- reference at `.0`.  The two `let` bindings are `Rad` and `Deg` — deliberately
+-- different types, so neither shifts the other's index.
+private fn kepler_step(@EccAnom, @Ecc, @MeanAnom -> @EccAnom)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Rad = deg_to_rad(@EccAnom.0);
+  let @Deg = @MeanAnom.0 - (@EccAnom.0 - 57.29577951308232 * @Ecc.0 * sin(@Rad.0));
+  @EccAnom.0 + @Deg.0 / (1.0 - @Ecc.0 * cos(@Rad.0))
+}
+
+-- Iterate to convergence.  `decreases` on the fuel counter is a termination
+-- proof: this loop cannot run forever, whatever the solver does numerically.
+private fn kepler_solve(@EccAnom, @Ecc, @MeanAnom, @Nat -> @EccAnom)
+  requires(true)
+  ensures(true)
+  decreases(@Nat.0)
+  effects(pure)
+{
+  if @Nat.0 == 0 then {
+    @EccAnom.0
+  } else {
+    kepler_solve(kepler_step(@EccAnom.0, @Ecc.0, @MeanAnom.0), @Ecc.0, @MeanAnom.0, @Nat.0 - 1)
+  }
+}
+
+-- =============================================================================
+-- Orbital elements, propagated linearly from J2000.0
+-- =============================================================================
+
+private fn julian_century(@Julian -> @Century)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  (@Julian.0 - 2451545.0) / 36525.0
+}
+
+private fn earth_elements(@Century -> @Elements)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Deg = wrap_deg(100.46457166 + 35999.37244981 * @Century.0 - (102.93768193 + 0.32327364 * @Century.0), 400);
+  Elements(1.00000261 + 0.00000562 * @Century.0, 0.01671123 - 0.00004392 * @Century.0, -0.00001531 - 0.01294668 * @Century.0, @Deg.0, 102.93768193 + 0.32327364 * @Century.0, 0.0)
+}
+
+private fn mars_elements(@Century -> @Elements)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Deg = wrap_deg(-4.55343205 + 19140.30268499 * @Century.0 - (-23.94362959 + 0.44441088 * @Century.0), 400);
+  Elements(1.52371034 + 0.00001847 * @Century.0, 0.0933941 + 0.00007882 * @Century.0, 1.84969142 - 0.00813131 * @Century.0, @Deg.0, -23.94362959 + 0.44441088 * @Century.0, 49.55953891 - 0.29257343 * @Century.0)
+}
+
+-- =============================================================================
+-- Orbital plane to J2000 ecliptic
+-- =============================================================================
+--
+-- The rotation is three separate functions rather than one returning a triple.
+-- Each takes the two in-plane coordinates and the three orientation angles: five
+-- parameters, five distinct types, so every reference inside is `.0`.  Written
+-- with five bare `@Float64` parameters these bodies would be a wall of
+-- `@Float64.4 * @Float64.2 - @Float64.3 * @Float64.1`, and a transposition
+-- would typecheck cleanly and give a wrong sky position.
+
+private fn rot_x(@OrbX, @OrbY, @ArgPeri, @Incl, @LongNode -> @XAu)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Rad = deg_to_rad(@ArgPeri.0);
+  (cos(@Rad.0) * cos(deg_to_rad(@LongNode.0)) - sin(@Rad.0) * sin(deg_to_rad(@LongNode.0)) * cos(deg_to_rad(@Incl.0))) * @OrbX.0 + (0.0 - sin(@Rad.0) * cos(deg_to_rad(@LongNode.0)) - cos(@Rad.0) * sin(deg_to_rad(@LongNode.0)) * cos(deg_to_rad(@Incl.0))) * @OrbY.0
+}
+
+private fn rot_y(@OrbX, @OrbY, @ArgPeri, @Incl, @LongNode -> @YAu)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Rad = deg_to_rad(@ArgPeri.0);
+  (cos(@Rad.0) * sin(deg_to_rad(@LongNode.0)) + sin(@Rad.0) * cos(deg_to_rad(@LongNode.0)) * cos(deg_to_rad(@Incl.0))) * @OrbX.0 + (0.0 - sin(@Rad.0) * sin(deg_to_rad(@LongNode.0)) + cos(@Rad.0) * cos(deg_to_rad(@LongNode.0)) * cos(deg_to_rad(@Incl.0))) * @OrbY.0
+}
+
+private fn rot_z(@OrbX, @OrbY, @ArgPeri, @Incl -> @ZAu)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Rad = deg_to_rad(@ArgPeri.0);
+  sin(@Rad.0) * sin(deg_to_rad(@Incl.0)) * @OrbX.0 + cos(@Rad.0) * sin(deg_to_rad(@Incl.0)) * @OrbY.0
+}
+
+-- Heliocentric position, J2000 ecliptic frame.
+private fn helio(@Elements -> @Vec3)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Elements.0 {
+    Elements(@SemiMajor, @Ecc, @Incl, @MeanAnom, @ArgPeri, @LongNode) -> {
+      let @EccAnom = kepler_solve(@MeanAnom.0, @Ecc.0, @MeanAnom.0, 40);
+      let @Rad = deg_to_rad(@EccAnom.0);
+      let @OrbX = @SemiMajor.0 * (cos(@Rad.0) - @Ecc.0);
+      let @OrbY = @SemiMajor.0 * sqrt(1.0 - @Ecc.0 * @Ecc.0) * sin(@Rad.0);
+      let @ArgPeri = @ArgPeri.0 - @LongNode.0;
+      Vec3(rot_x(@OrbX.0, @OrbY.0, @ArgPeri.0, @Incl.0, @LongNode.0), rot_y(@OrbX.0, @OrbY.0, @ArgPeri.0, @Incl.0, @LongNode.0), rot_z(@OrbX.0, @OrbY.0, @ArgPeri.0, @Incl.0))
+    }
+  }
+}
+
+-- =============================================================================
+-- Geocentric, then equatorial
+-- =============================================================================
+
+-- Nested destructure: the OUTER match's bindings sit at `.1` once the inner
+-- match pushes its own.  `@XAu.1 - @XAu.0` is therefore first minus second.
+private fn vec_sub(@Vec3, @Vec3 -> @Vec3)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Vec3.1 {
+    Vec3(@XAu, @YAu, @ZAu) -> match @Vec3.0 {
+      Vec3(@XAu, @YAu, @ZAu) -> Vec3(@XAu.1 - @XAu.0, @YAu.1 - @YAu.0, @ZAu.1 - @ZAu.0)
+    }
+  }
+}
+
+-- Rotate the ecliptic frame onto the equator (obliquity at J2000).
+private fn to_equatorial(@Vec3 -> @Vec3)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  match @Vec3.0 {
+    Vec3(@XAu, @YAu, @ZAu) -> {
+      let @Rad = deg_to_rad(23.43928);
+      Vec3(@XAu.0, @YAu.0 * cos(@Rad.0) - @ZAu.0 * sin(@Rad.0), @YAu.0 * sin(@Rad.0) + @ZAu.0 * cos(@Rad.0))
+    }
+  }
+}
+
+-- A distance cannot be negative.  `sqrt` is a float builtin, so this is a
+-- Tier 3 runtime check rather than a proof -- the boundary in action.
+private fn vec_norm(@Vec3 -> @Float64)
+  requires(true)
+  ensures(@Float64.result >= 0.0)
+  effects(pure)
+{
+  match @Vec3.0 {
+    Vec3(@XAu, @YAu, @ZAu) -> sqrt(@XAu.0 * @XAu.0 + @YAu.0 * @YAu.0 + @ZAu.0 * @ZAu.0)
+  }
+}
+
+-- Contrast with `declination`: this postcondition is identical in spirit but
+-- PROVES, because the value comes back through `wrap_deg` whose own range is
+-- proved.  Same file, same kind of claim, different tier -- the difference is
+-- whether a transcendental sits between the claim and the evidence.
+private fn right_ascension(@Vec3 -> @Deg)
+  requires(true)
+  ensures(@Deg.result >= 0.0 && @Deg.result < 360.0)
+  effects(pure)
+{
+  match @Vec3.0 {
+    Vec3(@XAu, @YAu, @ZAu) -> {
+      let @Deg = atan2(@YAu.0, @XAu.0) * 57.29577951308232;
+      wrap_deg(@Deg.0, 4)
+    }
+  }
+}
+
+-- Declination is an angle off the equator, so it lies in [-90, 90].  True by
+-- construction (`asin` cannot return more), but `asin` is opaque to the solver,
+-- so the guarantee is enforced at run time instead of proved.
+private fn declination(@Vec3 -> @Deg)
+  requires(true)
+  ensures(@Deg.result >= -90.0 && @Deg.result <= 90.0)
+  effects(pure)
+{
+  match @Vec3.0 {
+    Vec3(@XAu, @YAu, @ZAu) -> asin(@ZAu.0 / vec_norm(Vec3(@XAu.0, @YAu.0, @ZAu.0))) * 57.29577951308232
+  }
+}
+
+-- =============================================================================
+-- Sexagesimal rendering — back on Tier 1 ground
+-- =============================================================================
+
+private fn pad2(@Int -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  string_pad_start(int_to_string(@Int.0), 2, "0")
+}
+
+-- Right ascension as hours, minutes and seconds to one decimal place.
+private fn format_ra(@Deg -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @Float64 = @Deg.0 / 15.0;
+  let @Int = floor(@Float64.0);
+  let @Float64 = (@Float64.0 - int_to_float(@Int.0)) * 60.0;
+  let @Int = floor(@Float64.0);
+  let @Float64 = (@Float64.0 - int_to_float(@Int.0)) * 600.0;
+  string_concat(string_concat(pad2(floor(@Deg.0 / 15.0)), "h"), string_concat(string_concat(pad2(@Int.0), "m"), string_concat(string_concat(pad2(round(@Float64.0) / 10), "."), string_concat(int_to_string(round(@Float64.0) % 10), "s"))))
+}
+
+-- Declination as signed degrees, arcminutes and arcseconds.
+private fn format_dec(@Deg -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  let @String = if @Deg.0 < 0.0 then {
+    "-"
+  } else {
+    "+"
+  };
+  let @Float64 = if @Deg.0 < 0.0 then {
+    0.0 - @Deg.0
+  } else {
+    @Deg.0
+  };
+  let @Int = floor(@Float64.0);
+  let @Float64 = (@Float64.0 - int_to_float(@Int.0)) * 60.0;
+  string_concat(string_concat(@String.0, string_concat(pad2(@Int.0), "d")), string_concat(string_concat(pad2(floor(@Float64.0)), "m"), string_concat(pad2(round((@Float64.0 - int_to_float(floor(@Float64.0))) * 60.0)), "s")))
+}
+
+private fn report(@String, @Vec3 -> @String)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  string_concat(string_concat("  ", string_concat(string_pad_end(@String.0, 7, " "), "RA ")), string_concat(string_concat(format_ra(right_ascension(@Vec3.0)), "   Dec "), string_concat(string_concat(format_dec(declination(@Vec3.0)), "   "), string_concat(float_to_string(vec_norm(@Vec3.0)), " AU"))))
+}
+
+-- =============================================================================
+
+public fn main(@Unit -> @Unit)
+  requires(true)
+  ensures(true)
+  effects(<IO>)
+{
+  let @Century = julian_century(2461456.5);
+  let @Vec3 = helio(earth_elements(@Century.0));
+  let @Vec3 = helio(mars_elements(@Century.0));
+
+  -- The geocentric Sun is Earth's heliocentric position reversed.
+  let @Vec3 = to_equatorial(vec_sub(Vec3(0.0, 0.0, 0.0), @Vec3.1));
+  -- Mars needs the real two-body subtraction.
+  let @Vec3 = to_equatorial(vec_sub(@Vec3.1, @Vec3.2));
+
+  IO.print("Geocentric positions for JD 2461456.5 (2027 February 20.0 TT)\n\n");
+  IO.print(string_concat(report("Sun", @Vec3.1), "\n"));
+  IO.print(string_concat(report("Mars", @Vec3.0), "\n"))
+}

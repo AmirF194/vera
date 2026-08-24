@@ -10,6 +10,7 @@ See spec/06-contracts.md, Section 6.4 "Verification Conditions".
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -315,12 +316,64 @@ def _substitute_type(ty: Type, subst: dict[str, Type]) -> Type:
     return ty
 
 
+DEFAULT_Z3_TIMEOUT_MS = 10_000
+"""Per-query Z3 budget, in milliseconds, when nothing overrides it (#1350)."""
+
+Z3_TIMEOUT_ENV = "VERA_Z3_TIMEOUT_MS"
+
+
+class Z3BudgetError(ValueError):
+    """An explicit Z3 budget that is not a positive integer (#1350).
+
+    Raised rather than silently falling back, because a mistyped budget
+    that quietly reverts to the default would be indistinguishable from
+    the very host-sensitivity this knob exists to remove.
+    """
+
+
+def resolve_timeout_ms(explicit: int | str | None = None) -> int:
+    """The per-query Z3 budget, by the documented precedence (#1350).
+
+    ``explicit`` argument > ``VERA_Z3_TIMEOUT_MS`` > ``DEFAULT_Z3_TIMEOUT_MS``.
+    ``explicit`` may be an unparsed string (the CLI flag's raw argument),
+    which is validated on the same path as the environment variable.
+
+    The budget decides more than how long a run takes: an obligation whose
+    proof lands near it is Tier 1 on a fast host and Tier 3 on a slow one,
+    so the tier becomes a property of the machine rather than the program.
+    Making the budget settable is what lets a measurement say which it is —
+    raise it and a Tier 3 that becomes Tier 1 only needed more time.
+    """
+    if explicit is not None:
+        return _validated_budget(explicit, "timeout_ms")
+    raw = os.environ.get(Z3_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_Z3_TIMEOUT_MS
+    return _validated_budget(raw.strip(), Z3_TIMEOUT_ENV)
+
+
+def _validated_budget(value: int | str, source: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise Z3BudgetError(
+            f"{source}: expected a positive integer number of "
+            f"milliseconds, got {value!r}"
+        ) from None
+    if parsed <= 0:
+        raise Z3BudgetError(
+            f"{source}: expected a positive integer number of "
+            f"milliseconds, got {parsed}"
+        )
+    return parsed
+
+
 class SmtContext:
     """Z3 solver context with AST-to-Z3 expression translation."""
 
     def __init__(
         self,
-        timeout_ms: int = 10_000,
+        timeout_ms: int = DEFAULT_Z3_TIMEOUT_MS,
         fn_lookup: Callable[[str], Any] | None = None,
         module_fn_lookup: (
             Callable[[tuple[str, ...], str], Any] | None

@@ -27,7 +27,32 @@ import sys
 from pathlib import Path
 
 
-def extract_limitation_table_issues(text: str, table_header: str) -> set[int]:
+_ISSUE_LINK_RE = re.compile(r"\[#(\d+)\]\(https://github\.com/[^)]+\)")
+
+
+def _row_issue_links(line: str, issue_column_only: bool) -> set[int]:
+    """Issue links in one Markdown table row.
+
+    ``issue_column_only`` narrows the scan to the row's LAST cell — the
+    **Issue** column every limitation and bug table carries.  The two
+    widths answer different questions and both are wanted (#1337).
+
+    The presence checks want the WIDE form: an issue named anywhere in a
+    row is tracked by that row, so a cross-reference still counts as
+    coverage.  The ``--check-states`` scan wants the NARROW form,
+    because a row's prose legitimately cites CLOSED issues for context
+    — "the general disease behind [#1315]", "fixed in [#1305]" — and
+    reading those as claims that the issue is still open failed the
+    nightly on eight such citations while the row's own Issue column was
+    correct throughout.
+    """
+    source = line.strip().strip("|").split("|")[-1] if issue_column_only else line
+    return {int(n) for n in _ISSUE_LINK_RE.findall(source)}
+
+
+def extract_limitation_table_issues(
+    text: str, table_header: str, issue_column_only: bool = False
+) -> set[int]:
     """Extract issue numbers from a Markdown limitation table.
 
     Finds the table that follows `table_header` and extracts all issue
@@ -57,10 +82,7 @@ def extract_limitation_table_issues(text: str, table_header: str) -> set[int]:
             if re.match(r"^\|[\s\-|]+\|$", line.strip()):
                 continue
             # Extract issue numbers from this row
-            row_issues = re.findall(
-                r"\[#(\d+)\]\(https://github\.com/[^)]+\)", line
-            )
-            issues.update(int(n) for n in row_issues)
+            issues.update(_row_issue_links(line, issue_column_only))
         elif in_table:
             # Table ended
             break
@@ -68,7 +90,9 @@ def extract_limitation_table_issues(text: str, table_header: str) -> set[int]:
     return issues
 
 
-def extract_section_issues(text: str, heading: str) -> set[int] | None:
+def extract_section_issues(
+    text: str, heading: str, issue_column_only: bool = False
+) -> set[int] | None:
     """Extract issue links from the table rows of one `## heading` section.
 
     The scan is bounded at the next `## ` heading (or end of file), and
@@ -88,16 +112,13 @@ def extract_section_issues(text: str, heading: str) -> set[int] | None:
     for line in m.group(1).splitlines():
         if not line.strip().startswith("|"):
             continue
-        issues.update(
-            int(n)
-            for n in re.findall(
-                r"\[#(\d+)\]\(https://github\.com/[^)]+\)", line
-            )
-        )
+        issues.update(_row_issue_links(line, issue_column_only))
     return issues
 
 
-def extract_done_and_open(text: str) -> tuple[set[int], set[int]]:
+def extract_done_and_open(
+    text: str, issue_column_only: bool = False
+) -> tuple[set[int], set[int]]:
     """Extract open and Done issue sets from vera/README limitation table.
 
     Scans all table rows in the Current Limitations section.  Rows
@@ -118,12 +139,7 @@ def extract_done_and_open(text: str) -> tuple[set[int], set[int]]:
             break
         if not line.strip().startswith("|") or "---" in line:
             continue
-        row_issues = [
-            int(n)
-            for n in re.findall(
-                r"\[#(\d+)\]\(https://github\.com/[^)]+\)", line
-            )
-        ]
+        row_issues = _row_issue_links(line, issue_column_only)
         if "Done" in line:
             done_issues.update(row_issues)
         else:
@@ -281,12 +297,47 @@ def main() -> int:
     # ------------------------------------------------------------------
 
     if do_check_states:
+        # #1337: the state scan is an INVENTORY question — "does this table
+        # still claim the issue is open?" — so it reads each row's Issue
+        # column, not the row's prose.  The presence checks above keep the
+        # wide reading; re-extracting here is what keeps the two apart.
+        st_readme = extract_limitation_table_issues(
+            readme_text, "## Limitations", issue_column_only=True
+        ) | extract_limitation_table_issues(
+            readme_text, "## Bugs", issue_column_only=True
+        )
+        st_vera_readme_open, _st_done = extract_done_and_open(
+            vera_readme_text, issue_column_only=True
+        )
+        st_spec_issues: dict[str, set[int]] = {}
+        for spec_path, heading in spec_files:
+            full_path = root / spec_path
+            if not full_path.exists():
+                continue
+            found_spec = extract_limitation_table_issues(
+                full_path.read_text(encoding="utf-8"),
+                heading,
+                issue_column_only=True,
+            )
+            if found_spec:
+                st_spec_issues[spec_path] = found_spec
+        st_skill: set[int] = set()
+        for heading_text in ("Known Limitations", "Known Bugs and Workarounds"):
+            found_skill = extract_section_issues(
+                skill_text, heading_text, issue_column_only=True
+            )
+            if found_skill:
+                st_skill |= found_skill
+        st_lsp = extract_section_issues(
+            lsp_text, "Current limitations", issue_column_only=True
+        ) or set()
+
         all_issues = (
-            readme_issues
-            | vera_readme_open
-            | all_spec_issues
-            | skill_issues
-            | lsp_issues
+            st_readme
+            | st_vera_readme_open
+            | {n for s in st_spec_issues.values() for n in s}
+            | st_skill
+            | st_lsp
         )
         if all_issues:
             states = check_issue_states(all_issues)
@@ -294,16 +345,16 @@ def main() -> int:
                 state = states.get(num, "UNKNOWN")
                 if state == "CLOSED":
                     locations = []
-                    if num in readme_issues:
+                    if num in st_readme:
                         locations.append("KNOWN_ISSUES.md")
-                    if num in vera_readme_open:
+                    if num in st_vera_readme_open:
                         locations.append("vera/README.md")
-                    for spec_path, issues in spec_issues.items():
+                    for spec_path, issues in st_spec_issues.items():
                         if num in issues:
                             locations.append(spec_path)
-                    if num in skill_issues:
+                    if num in st_skill:
                         locations.append("SKILL.md")
-                    if num in lsp_issues:
+                    if num in st_lsp:
                         locations.append("LSP_SERVER.md")
                     errors.append(
                         f"Issue #{num} is CLOSED but still listed as "

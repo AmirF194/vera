@@ -389,6 +389,13 @@ The refinement on `SafeDiv`'s **second** parameter serves as the contract. The c
 | 2 | Extended: quantifiers, lemma/assert hints — [not yet implemented](https://github.com/aallan/vera/issues/427) | Z3 with hints | 10 seconds | Falls to Tier 3 |
 | 3 | Runtime | None (checks emitted as code) | N/A | Runtime trap |
 
+The ten-second figure is the DEFAULT per-query budget, not a fixed property of the
+language: `vera verify --timeout-ms N` sets it for one run and `VERA_Z3_TIMEOUT_MS`
+for an environment, in that precedence. This matters for reading a Tier 3: an
+obligation whose proof lands near the budget is Tier 1 on a fast host and Tier 3 on
+a slow one, so raising the budget is what distinguishes a claim that needed more
+time from one the solver can never see through.
+
 A fully Tier 1-verified program has the strongest guarantee: if it compiles, the contracts hold for all inputs. A program with Tier 3 contracts may fail at runtime if the contracts are violated.
 
 `vera verify` reports a one-line summary:

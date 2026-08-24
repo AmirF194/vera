@@ -1261,6 +1261,8 @@ infinity()                         -- returns Float64 (positive infinity)
 
 `float_is_nan` and `float_is_infinite` test for IEEE 754 special values. `nan()` and `infinity()` construct them — use `0.0 - infinity()` for negative infinity. All four are Tier 3 (runtime-tested, not SMT-verifiable).
 
+**Float postconditions are near the solver's ceiling.** Contract predicates over `@Float64` are discharged against Z3's IEEE-754 sort, which costs roughly an order of magnitude more solver time than the integer equivalent of the same shape — a two-branch absolute difference runs to several seconds where the `@Int` version takes a fraction of one. Shapes that land near the default per-query budget (10 s) are therefore host-sensitive: the same program can report Tier 1 on a fast machine and Tier 3 on a slow or busy one. When a float contract falls to Tier 3, re-run it with a larger budget — `vera verify --timeout-ms 60000 file.vera`, or `VERA_Z3_TIMEOUT_MS` for a whole session — before concluding anything: a claim that proves with more time needed time, while one that stays Tier 3 at any budget is standing behind something the solver cannot see through at all, such as `sqrt` or `asin`. Only the second kind is a reason to restate the contract.
+
 **Redeclaring a built-in effect is an error (E152)**: an `effect IO { ... }` block — or `State<T>`, `Exn<E>`, `Http`, `Random`, `Inference`, `DB`, `Diverge`, `Async`, `HttpServer` — is rejected at `vera check`, whether or not its operation signatures match the built-in. The operations come with the effect row: write `effects(<IO>)` on the function and call `IO.print(...)`. Beyond one canonical form, the block cannot be honoured — code generation routes a qualified `IO.op(...)` to the fixed host import by qualifier name and never reads the declaration, so a divergent signature used to compile to invalid WebAssembly that trapped at `run`. Give a genuinely different effect a distinct name (e.g. `Logger`).
 
 **Redefining a built-in is an error (E151)**: a function whose name matches a built-in (e.g. `abs`, `array_length`, `clamp`, `to_string`) is rejected at `vera check`. Built-ins are always in scope as the single canonical definition, so a second one is both redundant (one canonical form) and — for the verifier-modelled built-ins — silently unsound: the verifier would reason with the built-in's model while codegen runs your body. Call the built-in directly (no import needed), or give your function a distinct name (e.g. `magnitude`) for genuinely different behaviour. The one exception is the prelude's Option/Result/Json/Html *combinators* (`option_map`, `option_and_then`, `option_unwrap_or`, `result_map`, `result_unwrap_or`, `json_*`, `html_attr`): these are ordinary Vera functions the prelude injects, so a same-named user definition soundly replaces them.
@@ -2516,6 +2518,8 @@ vera check file.vera              # Parse and type-check
 vera check --json file.vera       # Type-check with JSON output (for parsing)
 vera verify file.vera             # Type-check + verify contracts via Z3
 vera verify --json file.vera      # Verify with JSON output (for parsing)
+vera verify --timeout-ms 60000 file.vera  # Per-query Z3 budget in ms (default
+                                  #   10000; env VERA_Z3_TIMEOUT_MS)
 vera compile file.vera                    # Compile to .wasm binary
 vera compile --wat file.vera              # Print WAT text (human-readable WASM)
 vera compile --target browser file.vera   # Compile + emit browser bundle
@@ -2668,8 +2672,8 @@ pytest tests/ -v                       # Run all tests (see TESTING.md)
 pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
 python scripts/check_conformance.py    # All 244 conformance programs hold (positives pass; negatives fail with their E-code)
-python scripts/check_examples.py       # All 42 examples must pass
-python scripts/check_corpus_canonical.py # All 293 corpus programs in canonical form
+python scripts/check_examples.py       # All 43 examples must pass
+python scripts/check_corpus_canonical.py # All 294 corpus programs in canonical form
 ```
 
 Test helpers follow a pattern: `_check_ok(source)` / `_check_err(source, match)` / `_verify_ok(source)` / `_verify_err(source, match)`. See existing tests for examples.
@@ -2679,7 +2683,7 @@ When implementing a new language feature, write the conformance program *first* 
 ### Invariants
 
 - All 244 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_decreases_float_rejected`, `ch05_reserved_fn_name_rejected`, `ch05_reserved_keyword_fn_rejected`, `ch05_reserved_contextual_keyword_fn_rejected`, `ch05_reserved_resume_fn_rejected`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_ambiguous_import_adt_rejected`, `ch08_ambiguous_import_adt_swapped_rejected`, `ch08_ambiguous_import_rejected`, `ch08_ambiguous_import_swapped_rejected`, `ch08_circular_import`, `ch08_reserved_vera_prefix_rejected`, `ch08_reserved_vera_prefix_reference_rejected`, `ch08_reserved_vera_prefix_binder_rejected`, `ch08_reserved_vera_prefix_effect_rejected`, `ch08_reserved_vera_prefix_ability_rejected`, `ch08_reserved_vera_prefix_constructor_rejected`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`, `ch06_quantifier_array_domain_rejected`, `ch07_handler_state_type_mismatch_rejected`, `ch02_alias_cycle_rejected`, `ch08_module_prelude_adt_contention_rejected`) must *fail* with their `expected_error` E-code, at the stage `expected_error_stage` names — `check` by default, or `compile` for a diagnostic the checker accepts and codegen refuses (`ch08_module_prelude_adt_contention_rejected` → E621), which also asserts the program type-checks cleanly first
-- All 42 examples in `examples/` must pass `vera check` and `vera verify`
+- All 43 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
@@ -3266,7 +3270,7 @@ The reference compiler is under active development. The current release includes
 
 - A seven-stage pipeline: parse, transform, resolve, typecheck, verify, compile, execute
 - A 14-chapter formal specification
-- 12,141 tests, including a 244-program conformance suite
+- 12,188 tests, including a 244-program conformance suite
 - 42 working example programs
 - 164 built-in functions covering strings, arrays, math, parsing, and data types
 - Four built-in abilities (Eq, Ord, Hash, Show) with constrained generics and ADT auto-derivation

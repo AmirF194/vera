@@ -28,6 +28,9 @@ vera check --explain-slots file.vera  # Show slot resolution table (which @T.n m
 vera verify file.vera             # Type-check + verify contracts via Z3
 vera verify --json file.vera      # Verify with JSON diagnostics
 vera verify --quiet file.vera     # Verify, suppress success output
+vera verify --timeout-ms 60000 file.vera  # Per-query Z3 budget in ms (default 10000;
+                                  #   env VERA_Z3_TIMEOUT_MS; raise it to tell a
+                                  #   needs-more-time Tier 3 from a never one, #1350)
 vera compile file.vera                    # Compile to .wasm binary
 vera compile --wat file.vera              # Print WAT text (human-readable WASM)
 vera compile --target browser file.vera   # Compile + emit browser bundle
@@ -60,9 +63,9 @@ VERA_DEBUG_HOST_ERRORS=1 vera run file.vera  # Re-raise a host callback's own ex
 mypy vera/                        # Type-check the compiler itself
 
 python scripts/check_conformance.py    # Verify all 244 conformance programs (positives pass their level; negatives fail with their expected_error E-code)
-python scripts/check_examples.py      # Verify all 42 examples parse + check + verify
+python scripts/check_examples.py      # Verify all 43 examples parse + check + verify
 python scripts/check_examples_run.py  # Run every runnable example trap-free under the native runtime; the rest carry a documented skip property, and an example that is neither is an error
-python scripts/check_corpus_canonical.py # Verify all 293 corpus programs are in canonical form (vera fmt)
+python scripts/check_corpus_canonical.py # Verify all 294 corpus programs are in canonical form (vera fmt)
 python scripts/check_examples_readme.py # Verify vera run commands in examples/README.md
 python scripts/check_spec_examples.py # Verify spec code blocks parse
 python scripts/check_readme_examples.py # Verify README code blocks parse
@@ -134,7 +137,7 @@ Before changing code — **adding or removing** — write the test that proves y
 
 - Pre-commit hooks run mypy + pytest + conformance suite + example validation on every commit
 - All 244 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_decreases_float_rejected`, `ch05_reserved_fn_name_rejected`, `ch05_reserved_keyword_fn_rejected`, `ch05_reserved_contextual_keyword_fn_rejected`, `ch05_reserved_resume_fn_rejected`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_ambiguous_import_adt_rejected`, `ch08_ambiguous_import_adt_swapped_rejected`, `ch08_ambiguous_import_rejected`, `ch08_ambiguous_import_swapped_rejected`, `ch08_circular_import`, `ch08_reserved_vera_prefix_rejected`, `ch08_reserved_vera_prefix_reference_rejected`, `ch08_reserved_vera_prefix_binder_rejected`, `ch08_reserved_vera_prefix_effect_rejected`, `ch08_reserved_vera_prefix_ability_rejected`, `ch08_reserved_vera_prefix_constructor_rejected`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`, `ch06_quantifier_array_domain_rejected`, `ch07_handler_state_type_mismatch_rejected`, `ch02_alias_cycle_rejected`, `ch08_module_prelude_adt_contention_rejected`) must *fail* with their `expected_error` E-code, at the stage `expected_error_stage` names — `check` by default, or `compile` for a diagnostic the checker accepts and codegen refuses (`ch08_module_prelude_adt_contention_rejected` → E621), which also asserts the program type-checks cleanly first
-- All 42 examples in `examples/` must pass `vera check` and `vera verify`
+- All 43 examples in `examples/` must pass `vera check` and `vera verify`
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
 - All tests must pass: `pytest tests/ -v`
 - Type checking must be clean: `mypy vera/`
