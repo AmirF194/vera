@@ -685,7 +685,7 @@ Trap-freedom is two signals, not one — the discipline `check_examples.py` alre
 | `collections.vera` | nothing, before the gate | runs |
 | `database.vera` | nothing, before the gate | runs |
 | `effect_handler.vera` | browser parity (stdout + State round-trips); `test_codegen_effects.py` pins six results | runs |
-| `ephemeris.vera` | `test_examples_ephemeris.py` pins the full stdout, both heliocentric distances, agreement with ERFA to 30″, and three per-function tier statuses | runs |
+| `ephemeris.vera` | `test_examples_ephemeris.py` pins the full stdout, both heliocentric distances, agreement with ERFA to 30″, and the per-function tier statuses — the eccentricity binds verified, `wrap_deg` at Tier 1, the transcendentals exactly `tier3` at a low, the default and a generous budget, `kepler_solve`'s termination proved | runs |
 | `factorial.vera` | browser parity (return value); `test_codegen_infrastructure.py` pins 120 | runs |
 | `file_io.vera` | browser runtime only, where file IO is a documented `Err` stub; never run natively before the gate | runs |
 | `fizzbuzz.vera` | nothing, before the gate | runs |
