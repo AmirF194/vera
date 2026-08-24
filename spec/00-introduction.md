@@ -14,7 +14,7 @@ The name comes from the Latin *veritas* (truth). In Vera, verification is a firs
 
 2. **Explicitness over convenience.** All state changes are declared. All effects are typed. All function contracts are mandatory. There is no implicit behaviour for the model to infer or hallucinate.
 
-3. **One canonical form.** Every construct has one preferred surface spelling: no style choices, no optional syntax, and no equivalent alternatives, unless an explicitly documented distinction changes typing or semantics. For a given parse, formatting is deterministic and idempotent; comments and blank-line placement are preserved in the output.
+3. **One canonical form.** Every construct has one preferred surface spelling: no style choices, no optional syntax, and no equivalent alternatives, unless an explicitly documented distinction changes typing or semantics. For a given parse, formatting is deterministic and idempotent; comments and blank-line placement influence the output.
 
 4. **Structural references over names.** Bindings are referenced by type and positional index (`@T.n`), not by arbitrary names. This eliminates naming consistency errors — one of the most common failure modes when models generate code across large contexts.
 
