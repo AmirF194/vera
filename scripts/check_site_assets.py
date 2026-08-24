@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_site import (  # noqa: E402
     DOCS,
+    build_impl_status,
     build_index_md,
     build_llms_full_txt,
     build_llms_txt,
@@ -381,6 +382,7 @@ def main() -> int:
         # sitemap.xml contains today's date, so skip exact comparison
         "index.md": build_index_md(version),
         "SKILL.md": build_skill_md(),
+        "implementation-status.md": build_impl_status(),
     }
 
     stale: list[str] = []

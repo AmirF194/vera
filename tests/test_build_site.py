@@ -696,3 +696,152 @@ def test_fact_coherence_md_row_cell_count_is_caught(tmp_path):
     assert errors, "a malformed table row must fail the gate"
     assert "cells" in joined
     assert str(md) in joined
+
+
+# =====================================================================
+# The generated implementation-status appendix (build_impl_status)
+# =====================================================================
+
+
+class TestImplementationStatusAppendix:
+    """The shipped-versus-specified boundary, collected from the spec.
+
+    The specification already marks every gap with a `Status:` callout;
+    what it lacked was one page that carries all of them. The page is
+    generated rather than written, so the property under test is not its
+    prose but its COMPLETENESS: a callout added to a chapter has to reach
+    the appendix without anyone remembering to copy it.
+    """
+
+    def _write_chapter(self, tmp_path: Path, name: str, text: str) -> Path:
+        spec_dir = tmp_path / "spec"
+        spec_dir.mkdir(exist_ok=True)
+        path = spec_dir / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_extracts_a_blockquote_callout_with_its_heading(
+        self, tmp_path: Path,
+    ) -> None:
+        """The nearest preceding heading is what locates a callout for a reader."""
+        chapter = self._write_chapter(tmp_path, "07-x.md", (
+            "# Chapter 7\n\n"
+            "## 7.1 Something Implemented\n\n"
+            "Prose that is not a callout.\n\n"
+            "### 7.1.2 The Gap\n\n"
+            "> **Status: Not yet implemented.** The widget is specified here\n"
+            "> but the compiler refuses it. Tracked in\n"
+            "> [#999](https://github.com/aallan/vera/issues/999).\n\n"
+            "More prose.\n"
+        ))
+        found = _mod._status_callouts(chapter)
+        assert len(found) == 1
+        heading, line, text = found[0]
+        assert heading == "7.1.2 The Gap"
+        assert line == 9
+        # The blockquote markers are stripped and the lines rejoined…
+        assert text.startswith("**Status: Not yet implemented.** The widget")
+        # …and the issue link survives, which is the actionable half.
+        assert "[#999](https://github.com/aallan/vera/issues/999)" in text
+        assert ">" not in text
+
+    def test_extracts_a_bare_paragraph_callout(self, tmp_path: Path) -> None:
+        """Chapter 13 spells its callout without a blockquote.
+
+        Matching only the `>` form would drop it silently — the one
+        omission an appendix like this cannot afford, since a missing
+        entry reads as "no gap here".
+        """
+        chapter = self._write_chapter(tmp_path, "13-y.md", (
+            "## 13.1 Target\n\n"
+            "**Status: experimental.**  Covers two host families\n"
+            "and rejects the rest.\n\n"
+            "Following prose.\n"
+        ))
+        found = _mod._status_callouts(chapter)
+        assert len(found) == 1
+        heading, _line, text = found[0]
+        assert heading == "13.1 Target"
+        assert text == (
+            "**Status: experimental.**  Covers two host families "
+            "and rejects the rest."
+        )
+        assert "Following prose" not in text
+
+    def test_a_callout_without_an_issue_link_is_still_captured(
+        self, tmp_path: Path,
+    ) -> None:
+        """Not every callout cites an issue; the scanner must not require one."""
+        chapter = self._write_chapter(tmp_path, "05-z.md", (
+            "## 5.2 Thing\n\n"
+            "> **Status: Implemented.** Fully working.\n"
+        ))
+        found = _mod._status_callouts(chapter)
+        assert len(found) == 1
+        assert found[0][2] == "**Status: Implemented.** Fully working."
+
+    def test_a_chapter_with_no_callouts_yields_nothing(
+        self, tmp_path: Path,
+    ) -> None:
+        """The paired negative: prose mentioning status is not a callout."""
+        chapter = self._write_chapter(tmp_path, "04-w.md", (
+            "## 4.1 Thing\n\nThe status of this feature is good.\n"
+        ))
+        assert _mod._status_callouts(chapter) == []
+
+    def test_output_carries_the_generated_header(self) -> None:
+        """The page names its generator, so nobody edits it by hand."""
+        out = _mod.build_impl_status()
+        assert out.startswith("<!-- GENERATED FILE")
+        assert "scripts/build_site.py (build_impl_status)" in out
+        assert "python scripts/build_site.py" in out
+        assert "# Implementation Status" in out
+
+    def test_generation_is_idempotent(self) -> None:
+        """Running the generator twice changes nothing.
+
+        The appendix is gated by `check_site_assets.py`, which compares the
+        file on disk against a fresh call; a generator that varied between
+        calls would make that gate fail at random.
+        """
+        assert _mod.build_impl_status() == _mod.build_impl_status()
+
+    def test_every_status_callout_in_the_spec_reaches_the_page(self) -> None:
+        """Count parity against a LIVE scan of spec/, not a fixture.
+
+        This is the property that matters: the appendix claims to be
+        complete. Counting the callouts independently — by scanning the
+        chapters for the marker directly — and comparing against the
+        entries emitted catches a scanner that silently skips a spelling,
+        which is how the bare-paragraph form in Chapter 13 would have been
+        lost.
+        """
+        spec_dir = _mod.ROOT / "spec"
+        live = 0
+        for chapter in sorted(spec_dir.glob("*.md")):
+            for raw in chapter.read_text(encoding="utf-8").splitlines():
+                stripped = raw.lstrip()
+                if stripped.startswith(">"):
+                    stripped = stripped[1:].lstrip()
+                if stripped.startswith("**Status:"):
+                    live += 1
+        assert live > 0, "no Status: callouts found — the scan is broken"
+        out = _mod.build_impl_status()
+        emitted = sum(1 for ln in out.splitlines() if ln.startswith("### "))
+        assert emitted == live, (
+            f"{live} Status: callouts in spec/ but {emitted} entries in the "
+            f"appendix — the scanner is missing a spelling, or a chapter is "
+            f"not being visited"
+        )
+        assert f"— {live} across " in out, (
+            "the page's own header count must agree with the entries below it"
+        )
+
+    def test_chapters_are_referenced_by_posix_relative_path(self) -> None:
+        """Paths in the output are POSIX-form, so Windows generates the same file."""
+        out = _mod.build_impl_status()
+        headings = [ln for ln in out.splitlines() if ln.startswith("## [")]
+        assert headings, "no chapter sections emitted"
+        for h in headings:
+            assert "\\" not in h, f"backslash in a generated path: {h!r}"
+            assert h.startswith("## [spec/"), h

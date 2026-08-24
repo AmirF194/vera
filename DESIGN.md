@@ -1,6 +1,6 @@
 # Design
 
-Technical decisions, rationale, and prior art. For the design philosophy and FAQ, see [FAQ.md](FAQ.md). For the formal specification, see [spec/](spec/). For the compiler architecture, see [vera/README.md](vera/README.md).
+Technical decisions, rationale, and prior art. For the design philosophy and FAQ, see [FAQ.md](FAQ.md). For the language specification, see [spec/](spec/). For the compiler architecture, see [vera/README.md](vera/README.md).
 
 ---
 
@@ -8,7 +8,7 @@ Technical decisions, rationale, and prior art. For the design philosophy and FAQ
 
 1. **Checkability over correctness.** Code that can be mechanically checked. When wrong, the compiler provides a natural language explanation of the error with a concrete fix — an instruction, not a status report.
 2. **Explicitness over convenience.** All state changes declared. All effects typed. All function contracts mandatory. No implicit behaviour.
-3. **One canonical form.** Every construct has exactly one textual representation. No style choices.
+3. **One canonical form.** One preferred spelling per construct; for a given parse, formatting is deterministic and idempotent. No style choices.
 4. **Structural references over names.** Bindings referenced by type and positional index (`@T.n`), not arbitrary names. See [`DE_BRUIJN.md`](DE_BRUIJN.md).
 5. **Contracts as the source of truth.** Every function declares what it requires and guarantees. The compiler verifies statically where possible.
 6. **Constrained expressiveness.** Fewer valid programs means fewer opportunities for the model to be wrong.
@@ -24,7 +24,7 @@ Technical decisions, rationale, and prior art. For the design philosophy and FAQ
 | Verification | Z3 static (Tier 1) → runtime fallback (Tier 3); Tier 2 (Z3-guided) is specified but not yet implemented | Maximises static guarantees; degrades gracefully where SMT is undecidable |
 | Effects | Algebraic, row-polymorphic (`IO`, `Http`, `HttpServer`, `State`, `Async`, `Inference`, `DB`, `Random`, `Diverge`, plus the parameterised exception effect `Exn<T>` — all reported by `vera effects --json`) | All state and side effects explicit; effects are typed, trackable, and handleable |
 | Error handling | `Result<T,E>` ADTs for expected errors; `Exn<T>` algebraic effect for exceptions | Errors are values; `match` enforces handling every case; `Exn<T>` is handleable like any other effect |
-| Inference | `Inference.complete` as an algebraic effect | LLM calls are typed, contract-verifiable, mockable via `handle[Inference]`, and explicit in signatures |
+| Inference | `Inference.complete` as an algebraic effect | LLM calls are typed, contract-verifiable, with user-defined handlers planned ([#372](https://github.com/aallan/vera/issues/372)), and explicit in signatures |
 | Data types | Algebraic data types + exhaustive `match` | No classes, no inheritance; compiler enforces every case is handled |
 | Polymorphism | Monomorphized generics (`forall<T where Eq<T>>`) | No runtime dispatch; four built-in abilities (`Eq`, `Ord`, `Hash`, `Show`); types fully specialised at compile time |
 | Refinement types | `{ @T \| predicate }` checked by Z3 | Encode value-level constraints in the type system; rejected statically or at runtime |

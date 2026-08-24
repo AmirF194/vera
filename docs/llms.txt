@@ -36,6 +36,7 @@ Current version: 0.1.13. The reference compiler is written in Python. Install th
 - [Chapter 11: Compilation](https://raw.githubusercontent.com/aallan/vera/main/spec/11-compilation.md): Compilation model and WebAssembly code generation.
 - [Chapter 12: Runtime](https://raw.githubusercontent.com/aallan/vera/main/spec/12-runtime.md): Runtime execution, memory management, and GC.
 - [Chapter 13: WASI Preview 2 Target](https://raw.githubusercontent.com/aallan/vera/main/spec/13-wasi.md): The `wasi-p2` compilation target — experimental WASI 0.2 components, the `--world server` wasi:http backend, and the divergences from the core runtime.
+- [Implementation Status](https://veralang.dev/implementation-status.md): Every `Status:` callout in the specification, collected — the boundary between what the reference compiler ships and what the chapters describe.
 
 ## Examples
 

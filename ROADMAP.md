@@ -12,11 +12,11 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-12,133 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+12,141 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## The v0.1.14 burndown
 
-*Seventeen open bugs, driven to zero.*
+*Twenty open bugs, driven to zero.*
 
 A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: a verifier that reports a proof it does not have is the one failure a reader cannot see.
 
@@ -38,6 +38,9 @@ A bug class outranks stage work, so the next release takes the open `bug`-labell
 | [#1322](https://github.com/aallan/vera/issues/1322) | A match binding's GC shadow-stack push is never popped, so the stack grows with recursion depth until it traps. |
 | [#1301](https://github.com/aallan/vera/issues/1301) | `md_parse` diverges between the native and browser runtimes on adversarial input. |
 | [#1328](https://github.com/aallan/vera/issues/1328) | The nightly stress workflow never exercises the host-handle reclamation battery. |
+| [#1347](https://github.com/aallan/vera/issues/1347) | String interpolation rejects a refinement type that resolves to an interpolable primitive, where a plain alias to the same primitive passes. |
+| [#1349](https://github.com/aallan/vera/issues/1349) | Internal Lark terminal names (`__ANON_0`) reach user-facing `Expected one of:` lists instead of the literals they stand for. |
+| [#1345](https://github.com/aallan/vera/issues/1345) | Chapter 6's MUST-warnings — one per `assume` statement, one per runtime-checked contract — are never emitted, so `vera verify` stays silent about work it did not prove. |
 | [#996](https://github.com/aallan/vera/issues/996) | `ch05_closure_nat_return` trapped once in a full conformance run and has not reproduced. |
 
 ## Stage 19 — The verification completeness sprint
@@ -64,10 +67,13 @@ Exit criterion: each listed drift class has a generator or a gate, and a release
 
 | Issue | What |
 |---|---|
+| [#1344](https://github.com/aallan/vera/issues/1344) | **Single-source registries umbrella** — one typed source of truth for built-ins, diagnostics, and doc mirrors.  The next three rows are its parts, and it is what makes them one campaign rather than three coincidences. |
 | [#735](https://github.com/aallan/vera/issues/735) | **Builtin dispatch table** — replace the 475-line `_translate_call` if-chain with a `{name: BuiltinSpec}` table, then have checker registration and the spec §9 tables consume it.  One table, three consumers. |
 | [#828](https://github.com/aallan/vera/issues/828) | `error_code` uniqueness — one stable code per diagnostic concept, enforced by a collision gate on the registry. |
 | [#954](https://github.com/aallan/vera/issues/954) | Single-source the `E001` example — generate all five doc mirrors from `vera/errors.py` instead of guarding hand-copies. |
 | [#1291](https://github.com/aallan/vera/issues/1291) | Rendered diagnostic output in docs — a `text` fence carrying compiler output is replayed against live output by a gate, the shape the `vera` fences already have. |
+| [#1351](https://github.com/aallan/vera/issues/1351) | `examples/README.md`'s **Demonstrates** column is ungated prose and has drifted — rows name features their example never calls. `check_examples_readme.py` replays the Run column only, so the claim half needs a gate of its own. |
+| [#1342](https://github.com/aallan/vera/issues/1342) | Conformance matrix — generate a construct × phase × target support table, so which constructs `check`, `verify`, and each compile target accept is read off the suite rather than asserted in prose. |
 | [#653](https://github.com/aallan/vera/issues/653) | Spec audit for §0.2 / §0.3 design-principle violations — the spec held to its own principles. |
 | [#540](https://github.com/aallan/vera/issues/540) | lychee + markdownlint MD051 cross-doc anchor validation. |
 
@@ -136,6 +142,7 @@ Exit criterion: the LSP limitation rows are retired, and a fresh VeraBench run (
 | [#424](https://github.com/aallan/vera/issues/424) | Register veralang.dev with llms.txt directories. |
 | [#525](https://github.com/aallan/vera/issues/525) | Close the remaining Agent Score gaps on veralang.dev. |
 | [#225](https://github.com/aallan/vera/issues/225) | VeraBench: pass@k evaluation, more models, more tiers — the sprint's measurement. |
+| [#1348](https://github.com/aallan/vera/issues/1348) | A contract clause placed after `effects` falls to the generic unexpected-token diagnostic, whose suggested fix cannot apply — the write–verify–fix loop hands the model a repair that does not repair. Wants a pattern-layer arm of the kind [#1173](https://github.com/aallan/vera/issues/1173) added. |
 | [#1139](https://github.com/aallan/vera/issues/1139) | Formatter internals: parse-time comment ownership and a single recursive renderer, making comment preservation and one-canonical-form structural properties rather than invariants spread across the emitters; retires the remaining relocation cases and the inline/multi-line dual paths. |
 
 ## Stage 24 — The browser sprint
@@ -167,7 +174,7 @@ Beyond the staged sprints — grouped by arc, each pulled forward by its trigger
 
 **Standard library long tail** — [#367](https://github.com/aallan/vera/issues/367) Markdown extractors, [#368](https://github.com/aallan/vera/issues/368) HTML accessors, [#507](https://github.com/aallan/vera/issues/507) ability-dispatched array operations, [#509](https://github.com/aallan/vera/issues/509) Unicode-aware string built-ins phase 2, [#1143](https://github.com/aallan/vera/issues/1143) `<DB>` effect phases 2–3 — named columns (via Map), typed rows (via JSON), and further backends.
 
-**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs, [#1275](https://github.com/aallan/vera/issues/1275) memoise module registration so `check`/`verify` stop re-running the per-module harvest checker once per module.
+**Compiler internals** — [#672](https://github.com/aallan/vera/issues/672) canonical WAT formatter, [#745](https://github.com/aallan/vera/issues/745) narrow the wrap-table / Phase 2c emission to `decimal_ops_used` only, [#739](https://github.com/aallan/vera/issues/739) typed `Protocol` interfaces for the mixin mypy carve-outs, [#1275](https://github.com/aallan/vera/issues/1275) memoise module registration so `check`/`verify` stop re-running the per-module harvest checker once per module, [#1343](https://github.com/aallan/vera/issues/1343) decompose `vera/verifier.py` and `smt.py` around explicit obligation generators and translators — sequenced after the [#1344](https://github.com/aallan/vera/issues/1344) umbrella, whose typed registries the generators are meant to consume.
 
 ## Ongoing threads
 
