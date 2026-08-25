@@ -1052,6 +1052,21 @@ class MonomorphizationMixin:
             op_result_types = {}
 
         if isinstance(node, ast.HandleExpr):
+            # Same field-drift guard as ``Monomorphizer._collect_calls``: this
+            # arm hand-enumerates HandleExpr's children because they are
+            # walked in different scopes, so a field added to the dataclass
+            # without a matching edit here would go silently unwalked, a
+            # missed generic call with no diagnostic pointing at this line.
+            enumerated = {"effect", "state", "clauses", "body"}
+            declared = {f.name for f in _fields(node)} - {"span"}
+            if declared != enumerated:  # pragma: no cover: guard
+                msg = (
+                    f"HandleExpr fields changed: {sorted(declared)}; this arm "
+                    f"walks {sorted(enumerated)}.  Add the new field to the "
+                    f"enclosing-scope group or to the handler-scope body walk, "
+                    f"an unwalked child hides every generic call inside it."
+                )
+                raise AssertionError(msg)
             for child in (node.effect, node.state, node.clauses):
                 self._collect_shadowed_qualified_calls(
                     child, path, decls_by_name, ctor_to_adt, instances,

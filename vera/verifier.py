@@ -2341,6 +2341,23 @@ class ContractVerifier:
             if op_result_types is None:
                 op_result_types = {}
             if isinstance(node, ast.HandleExpr):
+                # Same field-drift guard as ``Monomorphizer._collect_calls``:
+                # this arm hand-enumerates HandleExpr's children because they
+                # are walked in different scopes, so a field added to the
+                # dataclass without a matching edit here would go silently
+                # unwalked, a missed generic call with no diagnostic
+                # pointing at this line.
+                enumerated = {"effect", "state", "clauses", "body"}
+                declared = {f.name for f in ast_fields(node)} - {"span"}
+                if declared != enumerated:  # pragma: no cover: guard
+                    msg = (
+                        f"HandleExpr fields changed: {sorted(declared)}; this "
+                        f"arm walks {sorted(enumerated)}.  Add the new field "
+                        f"to the enclosing-scope group or to the "
+                        f"handler-scope body walk, an unwalked child hides "
+                        f"every generic call inside it."
+                    )
+                    raise AssertionError(msg)
                 for child in (node.effect, node.state, node.clauses):
                     walk_seed(child, op_result_types)
                 merged = {
