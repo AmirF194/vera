@@ -43,7 +43,7 @@ from vera.obligations.cache import (
 from vera.obligations.core import ProofObligation
 from vera.parser import parse
 from vera.resolver import ModuleResolver, ResolvedModule
-from vera.smt import SmtContext
+from vera.smt import SmtContext, resolve_timeout_ms
 from vera.transform import transform
 from vera.verifier import ContractVerifier, VerifySummary, summarize
 
@@ -94,8 +94,11 @@ class VerificationSession:
     resync rather than reconstruction.
     """
 
-    def __init__(self, timeout_ms: int = 10_000) -> None:
-        self._timeout_ms = timeout_ms
+    def __init__(self, timeout_ms: int | None = None) -> None:
+        # #1350: same precedence as `verify()` — explicit, else env,
+        # else the default — so the LSP's warm session and a cold CLI
+        # run classify against the same budget.
+        self._timeout_ms = resolve_timeout_ms(timeout_ms)
         self._smt: SmtContext | None = None
         # Phase B: per-function discharge cache (see cache.py for the
         # invalidation-key soundness model).

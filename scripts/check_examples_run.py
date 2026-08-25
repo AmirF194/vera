@@ -3,7 +3,7 @@
 trap-free under the native runtime, or is matched to a documented
 property that excludes it from harness execution.
 
-`scripts/check_examples.py` type-checks and verifies all 42 examples and
+`scripts/check_examples.py` type-checks and verifies every example and
 `scripts/check_e602_clean.py` compiles them, so an example that fails to
 parse, type-check, verify or compile is caught before this gate.  What
 none of them does is *run* one.  A program can pass every static stage
@@ -36,7 +36,7 @@ it — ``tests/test_db_runtime.py::TestDbOnDiskExample229`` pins
 `sqlitedb.vera`'s rendered city table,
 ``tests/test_codegen_host_effects.py`` pins `inference_json.vera`'s
 score line against a mocked provider, and ``tests/test_browser.py`` pins
-21 examples against the browser runtime.  A gate that re-pinned stdout
+examples against the browser runtime.  A gate that re-pinned stdout
 would duplicate those and go red on every cosmetic edit to an example.
 
 But *green* is two signals, not one, for the reason
@@ -149,7 +149,7 @@ SKIP_PROPERTIES: dict[str, str] = {
 }
 
 
-# The 34 examples the harness runs.  Entry points and arguments follow
+# The examples the harness runs.  Entry points and arguments follow
 # the invocations documented in `examples/README.md`, which
 # `scripts/check_examples_readme.py` independently holds to naming
 # functions that exist.
@@ -165,6 +165,7 @@ RUN_SPECS: dict[str, RunSpec] = {
     # round trip happened.
     "database": RunSpec(expect="database round-trip succeeded"),
     "effect_handler": RunSpec(),
+    "ephemeris": RunSpec(),
     "factorial": RunSpec(fn="factorial", args=("10",)),
     # Writes then reads back a file; a failed write prints the error and
     # completes normally, so the sentinel is what proves the round trip.
@@ -205,7 +206,7 @@ RUN_SPECS: dict[str, RunSpec] = {
 }
 
 
-# The 8 examples excluded by property.  Each is still type-checked,
+# The examples excluded by property.  Each is still type-checked,
 # verified and compiled by the other gates; only execution is out of
 # reach here.
 SKIPS: dict[str, str] = {
@@ -237,7 +238,7 @@ NEUTRALISED_ENV: tuple[str, ...] = (
 )
 
 
-# Per-example wall-clock budget.  Generous: the whole 34-program set runs
+# Per-example wall-clock budget.  Generous: the whole set runs
 # in a few seconds, so this only ever fires on a genuine hang, which is
 # reported as a failure rather than blocking the hook indefinitely.
 TIMEOUT_SECONDS = 300
@@ -681,7 +682,7 @@ def run_corpus(
                 # that tried would otherwise consume the user's keystrokes
                 # mid-hook.  DEVNULL is an immediate EOF, not a hang —
                 # which is why terminal-dependence rather than hanging is
-                # the reason the two stdin examples are skipped.
+                # the reason the stdin examples are skipped.
                 stdin=subprocess.DEVNULL,
                 env=build_env(spec, examples_dir),
                 timeout=TIMEOUT_SECONDS,

@@ -1092,6 +1092,46 @@ def bug_rows(known_issues_text: str) -> list[int] | None:
     return numbers or None
 
 
+def check_faq_example_count(faq_text: str, live_examples: int) -> list[str]:
+    """FAQ.md's by-the-numbers example bullet against the live count.
+
+    The same list's TEST bullet was already pinned, and its CONFORMANCE
+    bullet before that — each added only after the unpinned half had
+    drifted.  The example bullet went stale the same way, so it is pinned
+    here rather than left as the third instance of one lesson.  A missing
+    pattern is an error, not a skip: rewording the line would otherwise
+    disable the check and reopen the blind spot one level up.
+    """
+    errors: list[str] = []
+    # Anchored to the by-the-numbers BULLET, not to the phrase.  An unanchored
+    # search takes the first occurrence anywhere in the page, so prose above
+    # the list that happens to say "N working example programs" would be
+    # validated instead of the bullet -- the check would then be green while
+    # the bullet itself was stale.  Zero matches and MULTIPLE matches are both
+    # errors: a second bullet means the page has two answers and this function
+    # cannot say which one the reader believes.
+    found = re.findall(
+        r"^- ([\d,]+) working example programs\s*$", faq_text, re.MULTILINE
+    )
+    if not found:
+        return [
+            "FAQ.md: example-count bullet"
+            " ('- N working example programs') not found"
+        ]
+    if len(found) > 1:
+        return [
+            f"FAQ.md: example-count bullet appears {len(found)} times"
+            f" ({', '.join(found)}); expected exactly one"
+        ]
+    doc_examples = int(found[0].replace(",", ""))
+    if doc_examples != live_examples:
+        errors.append(
+            f"FAQ.md: example count: doc says {doc_examples},"
+            f" live is {live_examples}"
+        )
+    return errors
+
+
 def check_bug_rows(known_issues_text: str) -> list[str]:
     """Check the Bugs table's shape: one well-formed, unique issue per row."""
     numbers = bug_rows(known_issues_text)
@@ -1672,6 +1712,8 @@ def main() -> int:
                 f"FAQ.md: tests count: doc says {doc_tests},"
                 f" live is {live_total_tests}"
             )
+
+    errors.extend(check_faq_example_count(faq_md, live_examples))
 
     # ------------------------------------------------------------------
     # 13. Check docs/index.html status block

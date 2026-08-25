@@ -12,17 +12,16 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-12,141 tests, 244 conformance programs, 42 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+12,214 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
 
 ## The v0.1.14 burndown
 
-*Twenty open bugs, driven to zero.*
+*Nineteen open bugs, driven to zero.*
 
 A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: a verifier that reports a proof it does not have is the one failure a reader cannot see.
 
 | Issue | What |
 |---|---|
-| [#1337](https://github.com/aallan/vera/issues/1337) | `check_limitations_sync.py --check-states` reads every `#N` in KNOWN_ISSUES.md as a live-limitation citation, where the contract binds the Issue column alone. |
 | [#1332](https://github.com/aallan/vera/issues/1332) | **Soundness.** A `@Nat` tuple component's narrowing verifies as proved at construction while the compiled program traps on that value. |
 | [#1331](https://github.com/aallan/vera/issues/1331) | A user `data` declaration named after a built-in container compiles at the container's width, so a check-green program loses its exports to an E602 refusal. |
 | [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |

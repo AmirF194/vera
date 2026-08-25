@@ -1,6 +1,6 @@
 # Vera Examples
 
-42 example programs demonstrating Vera's features. All examples pass `vera check` and `vera verify`.
+43 example programs demonstrating Vera's features. All examples pass `vera check` and `vera verify`.
 
 ## Running Examples
 
@@ -90,4 +90,5 @@ Examples that use only the IO and Random host families (e.g. `hello_world.vera`,
 | `modules.vera` | `vera run examples/modules.vera --fn clamp_to_range -- 100 0 42` | Module imports, qualified calls, cross-file composition |
 | `gc_pressure.vera` | `vera run examples/gc_pressure.vera` | GC behaviour under allocation pressure |
 | `life.vera` | `vera run examples/life.vera` | Conway's Game of Life — nested array combinators, recursive run_loop with `<IO>`, ANSI cursor-control rendering, formal Conway B3/S23 rule on `next_cell` |
+| `ephemeris.vera` | `vera run examples/ephemeris.vera` | Geocentric ephemeris from Keplerian elements — `sin`, `cos`, `asin`, `atan2`, `sqrt`, `floor`, `round`, `int_to_float`, `float_to_string`, `string_pad_start`, `string_pad_end`; refinement types, `decreases` fuel loops, and the Tier 1/Tier 3 boundary at the transcendental builtins |
 | `maximum_syntax.vera` | `vera run examples/maximum_syntax.vera` | Breadth showcase: generics + abilities, refinement types, quantifiers, assert/assume, old()/new(), State/Exn handlers, Async/Random/HttpServer markers, Json/Ordering/Request/Response ADTs, pipe operator |

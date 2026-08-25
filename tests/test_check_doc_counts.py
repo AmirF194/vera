@@ -1049,3 +1049,103 @@ class TestErrorCodesCount:
         text = "The ERROR_CODES dict has 160 entries."
         errors = _MOD.check_error_codes_count(text, self._registry())
         assert len(errors) == 1 and "could not find" in errors[0]
+
+
+class TestFaqExampleCount:
+    """FAQ.md's by-the-numbers example bullet (#1346 review).
+
+    The page's conformance bullet was pinned first, then its test bullet
+    after that one drifted through two releases.  The example bullet went
+    stale the same way when the corpus grew to 43, so it is pinned too —
+    the third instance of one lesson, and the reason the check errors on a
+    MISSING pattern rather than skipping.
+    """
+
+    def _faq(self, n: str) -> str:
+        return (
+            "- A 14-chapter formal specification\n"
+            "- 12,188 tests, including a 244-program conformance suite\n"
+            f"- {n} working example programs\n"
+            "- 164 built-in functions\n"
+        )
+
+    def test_matching_count_is_clean(self) -> None:
+        assert _MOD.check_faq_example_count(self._faq("43"), 43) == []
+
+    def test_stale_count_is_reported(self) -> None:
+        errors = _MOD.check_faq_example_count(self._faq("42"), 43)
+        assert len(errors) == 1
+        assert "doc says 42" in errors[0] and "live is 43" in errors[0]
+
+    def test_thousands_separator_is_parsed(self) -> None:
+        assert _MOD.check_faq_example_count(self._faq("1,043"), 1043) == []
+
+    def test_missing_line_is_an_error_not_a_skip(self) -> None:
+        """Rewording the bullet must not silently disable the check."""
+        text = "- A 14-chapter formal specification\n- 43 examples, reworded\n"
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
+    def test_prose_decoy_before_the_bullet_is_ignored(self) -> None:
+        """The BULLET is read, not the first matching phrase on the page.
+
+        An unanchored search takes whichever occurrence comes first, so prose
+        above the list validates instead of the bullet — and the check stays
+        green while the bullet itself is stale.  Here the decoy carries the
+        correct count and the bullet carries a wrong one: an unanchored
+        implementation passes, an anchored one reports the bullet.
+        """
+        text = (
+            "Vera ships 43 working example programs today, and the list "
+            "below breaks the project down.\n"
+            "\n"
+            "- A 14-chapter formal specification\n"
+            "- 42 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert "doc says 42" in errors[0], errors
+
+    def test_a_second_bullet_is_an_error(self) -> None:
+        """Two bullets mean two answers; the check cannot pick one."""
+        text = (
+            "- 43 working example programs\n"
+            "- 43 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert "appears 2 times" in errors[0], errors
+
+    def test_indented_or_inline_mention_is_not_the_bullet(self) -> None:
+        """Only a top-level list item counts as the by-the-numbers bullet."""
+        text = "Some prose about 43 working example programs in passing.\n"
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
+    def test_an_indented_bullet_is_not_the_bullet(self) -> None:
+        """A nested list item is a sub-point, not the headline figure.
+
+        `re.MULTILINE`'s `^` anchors at the line start, so leading
+        whitespace already disqualifies it — this pins that, because an
+        unanchored search would happily read the indented count and report
+        the page as consistent while the real bullet said something else.
+        """
+        text = (
+            "- Project size:\n"
+            "  - 43 working example programs\n"
+        )
+        errors = _MOD.check_faq_example_count(text, 43)
+        assert len(errors) == 1, errors
+        assert errors[0] == (
+            "FAQ.md: example-count bullet"
+            " ('- N working example programs') not found"
+        ), errors
+
+    def test_the_shipped_faq_is_consistent(self) -> None:
+        """The real page, against the real corpus."""
+        root = _SCRIPT.parent.parent
+        faq = (root / "FAQ.md").read_text(encoding="utf-8")
+        live = len(list((root / "examples").glob("*.vera")))
+        assert _MOD.check_faq_example_count(faq, live) == []

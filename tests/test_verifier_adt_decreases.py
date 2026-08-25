@@ -343,7 +343,7 @@ private fn sum(@List<Int> -> @Int)
         assert result.summary.tier1_verified == 8
 
     def test_overall_tier_counts(self) -> None:
-        """All examples together: 364 T1 / 120 T3 / 484 total (current).
+        """All examples together: 411 T1 / 122 T3 / 533 total (current).
 
         Counts move when examples are added or their contracts become
         more / less verifiable.  Trajectory:
@@ -478,7 +478,17 @@ private fn sum(@List<Int> -> @Int)
         postcondition the verifier discharged statically; the user-defined
         `magnitude`/`larger` shed it, so one obligation moves T1 -> T3.  Net:
         -1 T1, +1 T3, +0 total: 271/81/352 -> 270/82/352.
+        * 411/122/533 after `ephemeris.vera` (#143) contributed 47 T1 +
+          2 T3 + 49 contracts.  The two T3s are the `ensures` clauses of
+          `vec_norm` and `declination`, each standing on the far side of a
+          `sqrt` or an `asin` — float builtins are opaque to the solver by
+          design, so the claims are runtime-guarded rather than proved, and
+          no solver budget reaches them.  Net: +47 T1, +2 T3, +49 total,
+          +0 t3u.
         """
+        # The DEFAULT budget is the premise: `conftest.py`'s autouse
+        # `_default_z3_budget` scrubs an inherited VERA_Z3_TIMEOUT_MS so this
+        # loop measures what TESTING.md publishes.
         t1 = t3 = total = t3u = 0
         for f in sorted(EXAMPLES_DIR.glob("*.vera")):
             text = f.read_text(encoding="utf-8")
@@ -494,6 +504,15 @@ private fn sum(@List<Int> -> @Int)
             _diags, artifacts = typecheck_with_artifacts(
                 prog, text, file=str(f), resolved_modules=resolved,
             )
+            # The DEFAULT budget, deliberately.  This pin briefly carried an
+            # explicit 60 s because `ephemeris.vera` had an obligation proving
+            # in ~9-11 s against the 10 s default, which made the count a
+            # property of host speed.  That obligation is gone — the example
+            # bounds its eccentricity at construction now, rather than deriving
+            # it through a division chain — so every obligation in the corpus
+            # sits far from any plausible budget and the pin measures the
+            # programs rather than the machine.  Verified flip-free across
+            # [500 ms, 20 s], warm and cold (#1350).
             result = verify(prog, text, file=str(f),
                             resolved_modules=resolved,
                             expr_types=artifacts.expr_semantic_types,
@@ -653,9 +672,12 @@ private fn sum(@List<Int> -> @Int)
         # helpers state the values their caller's `ensures` had been asserting
         # about them).  The obligation SET is unchanged, only the tier:
         # +5 T1, -5 T3, +0 total: 359/125/484 -> 364/120/484.
-        assert t1 == 364, f"Expected 364 T1, got {t1}"
-        assert t3 == 120, f"Expected 120 T3, got {t3}"
-        assert total == 484, f"Expected 484 total, got {total}"
+        #
+        # #143: `ephemeris.vera`, the first floating-point example, adds
+        # 47 T1 + 2 T3: 364/120/484 -> 411/122/533.
+        assert t1 == 411, f"Expected 411 T1, got {t1}"
+        assert t3 == 122, f"Expected 122 T3, got {t3}"
+        assert total == 533, f"Expected 533 total, got {total}"
         assert t3u == 0, f"Expected 0 tier3_unguarded, got {t3u}"
 
 

@@ -36,6 +36,8 @@ vera check file.vera              # Parse and type-check
 vera check --json file.vera       # Type-check with JSON output (for parsing)
 vera verify file.vera             # Type-check + verify contracts via Z3
 vera verify --json file.vera      # Verify with JSON output (for parsing)
+vera verify --timeout-ms 60000 file.vera  # Per-query Z3 budget in ms (default
+                                  #   10000; env VERA_Z3_TIMEOUT_MS)
 vera compile file.vera                    # Compile to .wasm binary
 vera compile --wat file.vera              # Print WAT text (human-readable WASM)
 vera compile --target browser file.vera   # Compile + emit browser bundle
@@ -188,8 +190,8 @@ pytest tests/ -v                       # Run all tests (see TESTING.md)
 pytest tests/test_conformance.py -v    # Conformance suite only
 mypy vera/                             # Type-check the compiler
 python scripts/check_conformance.py    # All 244 conformance programs hold (positives pass; negatives fail with their E-code)
-python scripts/check_examples.py       # All 42 examples must pass
-python scripts/check_corpus_canonical.py # All 293 corpus programs in canonical form
+python scripts/check_examples.py       # All 43 examples must pass
+python scripts/check_corpus_canonical.py # All 294 corpus programs in canonical form
 ```
 
 Test helpers follow a pattern: `_check_ok(source)` / `_check_err(source, match)` / `_verify_ok(source)` / `_verify_err(source, match)`. See existing tests for examples.
@@ -199,7 +201,7 @@ When implementing a new language feature, write the conformance program *first* 
 ### Invariants
 
 - All 244 conformance programs in `tests/conformance/` must hold at their declared level — positive entries pass, and the negative fixtures (`ch02_generic_over_unit_rejected`, `ch02_map_unit_value_rejected`, `ch04_let_unit_rejected`, `ch05_apply_fn_arity`, `ch05_decreases_float_rejected`, `ch05_reserved_fn_name_rejected`, `ch05_reserved_keyword_fn_rejected`, `ch05_reserved_contextual_keyword_fn_rejected`, `ch05_reserved_resume_fn_rejected`, `ch05_where_helper_outer_slot_rejected`, `ch07_handler_state_body_scope_rejected`, `ch07_old_outside_ensures_rejected`, `ch07_state_unit_op_param_read_rejected`, `ch08_ambiguous_import_adt_rejected`, `ch08_ambiguous_import_adt_swapped_rejected`, `ch08_ambiguous_import_rejected`, `ch08_ambiguous_import_swapped_rejected`, `ch08_circular_import`, `ch08_reserved_vera_prefix_rejected`, `ch08_reserved_vera_prefix_reference_rejected`, `ch08_reserved_vera_prefix_binder_rejected`, `ch08_reserved_vera_prefix_effect_rejected`, `ch08_reserved_vera_prefix_ability_rejected`, `ch08_reserved_vera_prefix_constructor_rejected`, `ch08_visibility_private`, `ch09_builtin_effect_redefinition_rejected`, `ch09_builtin_redefinition`, `ch09_ord_adt_rejected`, `ch09_eq_non_derivable_rejected`, `ch09_sql_injection_rejected`, `ch09_sql_placeholder_mismatch_rejected`, `ch09_sql_placeholder_let_mismatch_rejected`, `ch09_sql_numbered_placeholder_rejected`, `ch07_bare_effect_op_rejected`, `ch06_quantifier_array_domain_rejected`, `ch07_handler_state_type_mismatch_rejected`, `ch02_alias_cycle_rejected`, `ch08_module_prelude_adt_contention_rejected`) must *fail* with their `expected_error` E-code, at the stage `expected_error_stage` names — `check` by default, or `compile` for a diagnostic the checker accepts and codegen refuses (`ch08_module_prelude_adt_contention_rejected` → E621), which also asserts the program type-checks cleanly first
-- All 42 examples in `examples/` must pass `vera check` and `vera verify`
+- All 43 examples in `examples/` must pass `vera check` and `vera verify`
 - `mypy vera/` must be clean
 - `pytest tests/ -v` must pass
 - Version must stay in sync across `pyproject.toml`, `vera/__init__.py`, `docs/index.html`, `README.md`, and `uv.lock` (gated by `scripts/check_version_sync.py`); CHANGELOG.md must also carry a matching `## [X.Y.Z]` section
