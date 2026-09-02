@@ -97,6 +97,25 @@ _OPAQUE_SCRUTINEE_REASON = (
 )
 
 
+def _is_ctor_application(term: object, sort: object) -> bool:
+    """True when *term* is one of *sort*'s constructors applied to arguments.
+
+    The semantic form of the literal-scrutinee test in
+    :py:meth:`ContractVerifier._subpattern_source_facts`, which asks the same
+    question of the scrutinee's AST.  A `let`-bound tuple reaches the match as a
+    slot reference — not syntactically a constructor call — while its Z3 term is
+    still ``Tuple(@Int.0, 5)``, so only the term can answer it (#1332).
+    """
+    try:
+        decl = term.decl()  # type: ignore[attr-defined]
+        return any(
+            decl == sort.constructor(i)  # type: ignore[attr-defined]
+            for i in range(sort.num_constructors())  # type: ignore[attr-defined]
+        )
+    except (AttributeError, z3.Z3Exception):
+        return False
+
+
 def _walk_fn_decls(program: ast.Program) -> Iterator[ast.FnDecl]:
     """Every function *declaration* in *program*, ``where``-helpers included.
 
@@ -7305,8 +7324,12 @@ class ContractVerifier:
         establishes it), while a genuine narrowing (``Option<Int>`` bound as
         ``@PosInt``) yields no fact (source is ``Int``) and stays *obligated*,
         never assumed.  Only the projectable opaque-scrutinee path yields facts;
-        a literal-constructor scrutinee binds concrete arguments the body
-        reasons about directly.  Recurses into nested constructor patterns
+        a constructor-application scrutinee binds concrete arguments the body
+        reasons about directly.  That last test is made of the scrutinee's TERM,
+        in :py:meth:`_subpattern_source_facts_term` — the syntactic check here
+        catches only the scrutinee spelled as a literal ``ConstructorCall``, and
+        a ``let``-bound tuple reaches the match as a slot reference (#1332).
+        Recurses into nested constructor patterns
         (``Some(Some(@PosInt))``) so a nested bind's invariant is carried too
         (CR PR-review)."""
         if scrutinee_z3 is None:
@@ -7328,7 +7351,11 @@ class ContractVerifier:
         into nested constructor patterns.  *scrut_ty* is the scrutinee's
         resolved type; *scrut_term* its Z3 datatype term.  No depth cap: the
         recursion descends the (finite) pattern AST — each step is a strict
-        sub-pattern — so it terminates without a backstop (CR PR-review)."""
+        sub-pattern — so it terminates without a backstop (CR PR-review).
+
+        Carries the anti-circularity test in its term form: a scrutinee that IS
+        a constructor application yields no facts, at this level and at every
+        nested one (#1332)."""
         if scrut_term is None:
             return []
         field_types = self._instantiated_field_types(pattern.name, scrut_ty)
@@ -7340,6 +7367,18 @@ class ContractVerifier:
         except Exception:  # pragma: no cover — non-datatype scrutinee  # noqa: BLE001
             return []
         if idx is None:
+            return []
+        if _is_ctor_application(scrut_term, sort):
+            # #1332: the scrutinee was BUILT here, so its components are the
+            # concrete arguments of that construction — each still carrying its
+            # own narrowing obligation.  A source fact read off the declared
+            # type would assume exactly what those obligations must prove, and
+            # the accessor axiom reduces it to the obligation's own goal:
+            # `Tuple_0(Tuple(@Int.0, 5)) >= 0` IS `@Int.0 >= 0`.  The fact is
+            # true at run time only because codegen guards the destructure, so
+            # assuming it to prove the guard unreachable is circular.  Nothing
+            # is lost: whatever establishes the construction establishes the
+            # component, and the body reasons about the argument directly.
             return []
         facts: list[object] = []
         for i, (sub_pat, field_ty) in enumerate(
