@@ -12,17 +12,18 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-12,218 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs (burndown material rather than stage work), plus the *limitations* the stages below retire.
+12,290 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs (burndown material rather than stage work), plus the *limitations* the stages below retire.
 
 ## The v0.1.14 burndown
 
-*Nineteen open bugs, driven to zero.*
+*Twenty open bugs, driven to zero.*
 
-A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The soundness row leads it: a verifier that reports a proof it does not have is the one failure a reader cannot see.
+A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The rows where the compiler reports success and is wrong anyway — a proof that does not hold, an accounting that misstates what was checked — lead it; the rest are grouped by root-cause family.
 
 | Issue | What |
 |---|---|
-| [#1332](https://github.com/aallan/vera/issues/1332) | **Soundness.** A `@Nat` tuple component's narrowing verifies as proved at construction while the compiled program traps on that value. |
+| [#1363](https://github.com/aallan/vera/issues/1363) | **Soundness.** A fact disclosed as neither proved nor guarded is still assumed at Tier 1 downstream, so a postcondition proves from what the same run admitted it could not establish. |
+| [#1362](https://github.com/aallan/vera/issues/1362) | **Accounting.** A handler-clause `@Nat` payload narrowing counts as runtime-guarded while nothing guards it and nothing discloses it, so a negative returns untrapped from a verify-clean program. |
 | [#1331](https://github.com/aallan/vera/issues/1331) | A user `data` declaration named after a built-in container compiles at the container's width, so a check-green program loses its exports to an E602 refusal. |
 | [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |
 | [#1320](https://github.com/aallan/vera/issues/1320) | The checker admits literal patterns over scrutinees that can never match them — the general disease behind #1315. |

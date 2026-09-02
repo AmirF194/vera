@@ -120,12 +120,13 @@ def exceptions_engine() -> wasmtime.Engine:
     ``Exn`` module and is measuring the runner's wasmtime build rather than
     the compiler.
 
-    That is a claim about the range, not about today's runner: on wasmtime
-    47.0.1 exceptions default ON, so a bare ``wasmtime.Engine()`` currently
-    loads the whole corpus.  What the proposal being off costs is measured
-    directly instead — 10 of the 30 handler-bearing modules
-    ``test_state_exn_registration`` validates fail to load with
-    ``wasm_exceptions=False``, which is what a supported older runner sees.
+    That is a claim about the range, not about today's runner: on current
+    wasmtime releases (measured at 48.0.0) exceptions default ON, so a bare
+    ``wasmtime.Engine()`` currently loads the whole corpus.  What the proposal
+    being off costs is measured directly instead — at wasmtime 48.0.0, 12 of the
+    39 handler-bearing modules ``test_state_exn_registration`` validates fail to
+    load with ``wasm_exceptions=False``, which is what a supported older runner
+    sees.
     """
     config = wasmtime.Config()
     config.wasm_exceptions = True

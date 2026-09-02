@@ -1106,26 +1106,27 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     Two legs, because the name comparison alone is not the invariant.  The
     symbol-set leg catches an UNDECLARED symbol, over every program in the
     sweep.  The validation leg — handing the HANDLER-BEARING modules (the
-    ones that reference a `state_*` / `exn_*` symbol at all, currently 30 of
-    them; the 31 in the floors below counts distinct SYMBOLS, not modules) to
+    ones that reference a `state_*` / `exn_*` symbol at all; the distinct-symbol
+    floor below counts SYMBOLS, not modules) to
     `wasmtime.Module`, which type-checks the whole thing — catches a symbol
     declared at the WRONG TYPE, which the name comparison reports as
     perfectly balanced: the #1231 shape declared `state_get_Bool` (i32) for a
     call the checker had typed `Int` (i64), and a Byte-literal-into-an-`Int`-
     cell shape declared the right names with mismatched value types.  Both
     passed a name-only differential while being invalid WASM.  The engine is
-    `exceptions_engine()`, not a default one: 10 of those 30 modules fail to
-    load when `wasm_exceptions` is off, which is a supported wasmtime
-    configuration (see that helper for why the current runner, where the
+    `exceptions_engine()`, not a default one: at wasmtime 48.0.0, 12 of those
+    39 modules fail to load when `wasm_exceptions` is off, which is a supported
+    wasmtime configuration (see that helper for why the current runner, where the
     proposal defaults on, does not settle the question).
 
     TWO LIMITS, stated rather than implied.  First, this builds each module
     through `transform` → `codegen_compile` — a CHECKER-LESS shortcut.  The
     real toolchain threads the resolver and the checker's artifacts
     (`expr_semantic_types`, `expr_target_types`, `module_artifacts`), and the
-    WAT it produces is not always the same text: measured on this corpus, 52
-    of the 201 programs the toolchain compiles differ from their shortcut
-    build.  The invariant under test (registration ⊇ lowering) is a property
+    WAT it produces is not always the same text: a substantial minority of the
+    corpus differs between the two builds (de-counted for the same reason as
+    the floors below — the proportion moves with every corpus addition and
+    nothing here is gated on it).  The invariant under test (registration ⊇ lowering) is a property
     of the codegen pass both share, but a divergence in the shortcut's favour
     is possible in principle and this sweep would not see it.  Second, it is
     anchored, not exploratory: it holds the invariant over the programs the
@@ -1201,12 +1202,13 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     # globally distinct symbols across the corpus is much smaller, and both
     # are floored so neither reading can be quietly gamed.
     #
-    # Re-measured at round 5, after the conformance negatives were filtered
-    # out of the sweep: swept 201, symbol_refs 128, distinct 31, validated 30
-    # (the filter removed 25 programs and one handler-bearing module — a
-    # deliberately-rejected fixture that referenced a family).  Each floor
-    # sits below its measurement with room for ordinary corpus churn, and far
-    # enough above zero that an emptied regex or a vanished corpus fails.
+    # The floors sit far below the live measurement and far above zero, so
+    # ordinary corpus churn never trips one while an emptied regex or a
+    # vanished corpus does.  The live values are deliberately NOT restated
+    # here: they move with every corpus addition, and a quadruple of them in a
+    # comment is stale the moment it is written — each assertion below prints
+    # its own live value in the failure message, which is where a reader who
+    # needs the number is already looking.
     assert swept >= 150, f"only {swept} programs compiled — sweep too small"
     assert symbol_refs >= 90, (
         f"only {symbol_refs} state/exn symbol references summed across "
