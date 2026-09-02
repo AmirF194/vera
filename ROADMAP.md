@@ -12,13 +12,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-12,282 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs (burndown material rather than stage work), plus the *limitations* the stages below retire.
+12,290 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs (burndown material rather than stage work), plus the *limitations* the stages below retire.
 
 ## The v0.1.14 burndown
 
 *Twenty open bugs, driven to zero.*
 
-A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  It is ordered by how little warning the failure gives: the rows where the compiler reports success and is wrong anyway — a proof that does not hold, an accounting that misstates what was checked — come before the ones that fail loudly and in the open.
+A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The rows where the compiler reports success and is wrong anyway — a proof that does not hold, an accounting that misstates what was checked — lead it; the rest are grouped by root-cause family.
 
 | Issue | What |
 |---|---|

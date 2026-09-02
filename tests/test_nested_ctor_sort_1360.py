@@ -449,8 +449,15 @@ def test_every_json_command_envelopes_an_internal_error(
     """`check`, `verify` and `test` all keep the `--json` contract.
 
     `verify` had the only backstop; the other two produced empty stdout on an
-    internal error.  The three commands share one shape — a single `try` with
-    the same two handlers — so they share one helper.
+    internal error.  They now share one helper — but NOT, as an earlier version
+    of this docstring claimed, because they already shared one shape: `check`
+    and `test` kept their imports outside the protected region and their
+    sibling handlers bare long after `verify` did not, and this cell could not
+    see that.  It injects at `_load_and_parse`, which is INSIDE the try for all
+    three, so it is structurally incapable of reaching either gap — the same
+    can-this-fixture-produce-a-positive trap as the arm-reading probe, twice in
+    one commit.  The import and handler routes are covered by their own cells
+    below, which inject where the gaps actually were.
     """
     import vera.cli as cli_mod
 
@@ -473,6 +480,16 @@ def test_every_json_command_envelopes_an_internal_error(
     assert "synthetic internal failure" in diag["description"]
 
 
+# Spec 0.5.1's required fields, written out from the SPECIFICATION rather than
+# read off the implementation.  A list built from what the envelope happens to
+# emit can only ever confirm itself; this one can fail.  `source_line` is not
+# here: 0.5.1 asks for the offending source line to be quoted, and an internal
+# error has no source position, so the envelope omits it deliberately — the
+# claim that it carried one is what this list replaced.
+_CONTRACT_FIELDS = ("severity", "error_code", "description", "location",
+                    "rationale", "fix", "spec_ref")
+
+
 def test_the_envelope_carries_the_full_diagnostic_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -493,11 +510,16 @@ def test_the_envelope_carries_the_full_diagnostic_contract(
     _rc, out, _ = _run_cmd(cmd_verify, src, as_json=True)
     diag = json.loads(out)["diagnostics"][0]
 
+    missing = [f for f in _CONTRACT_FIELDS if not diag.get(f)]
+    assert not missing, f"envelope omits contract fields: {missing}"
     assert diag["severity"] == "error"
     assert diag["error_code"] == "E699"
-    assert diag["rationale"] and diag["fix"] and diag["spec_ref"]
     assert diag["location"]["file"] == str(src), (
         "the location names no file — a consumer cannot join it to anything"
+    )
+    assert "source_line" not in diag, (
+        "an internal error has no source position; a quoted line here would be "
+        "invented"
     )
 
 
@@ -517,3 +539,142 @@ def test_the_text_path_formats_like_any_other_diagnostic(
     assert rc == 1
     assert "E699" in err
     assert "Traceback (most recent call last)" not in err
+
+
+@pytest.mark.parametrize("cmd_name,mod", [
+    ("cmd_check", "vera.checker"),
+    ("cmd_verify", "vera.verifier"),
+    ("cmd_test", "vera.tester"),
+])
+def test_every_command_envelopes_a_failing_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cmd_name: str, mod: str,
+) -> None:
+    """Each command's own function-scope imports are inside its guarded region.
+
+    `verify`'s moved first; `check` and `test` still imported before their
+    `try`, so a broken wheel bypassed the very envelopes they had just been
+    given.  Red for `check` and `test` before this change.
+    """
+    import builtins
+
+    import vera.cli as cli_mod
+
+    real_import = builtins.__import__
+
+    def hostile(name, *a, **k):
+        if name == mod:
+            raise ImportError(f"{mod}: simulated broken wheel")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", hostile)
+    src = tmp_path / "imp.vera"
+    src.write_text(_program("@Int", "@Int", "@Int.0"), encoding="utf-8")
+    rc, out, _ = _run_cmd(getattr(cli_mod, cmd_name), src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), f"{cmd_name}: stdout was EMPTY — the import bypassed it"
+    payload = json.loads(out)
+    assert "E699" in [d.get("error_code") for d in payload["diagnostics"]]
+    assert "simulated broken wheel" in payload["diagnostics"][0]["description"]
+
+
+def test_the_last_resort_fallback_engages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the REPORTING path itself raises, a minimal envelope still lands.
+
+    The envelope is worth nothing if the code emitting it can raise, so the
+    helper's own `Diagnostic` route has a hand-built fallback underneath.
+    Driven by breaking `Diagnostic.to_dict` for every diagnostic — including
+    the one the helper builds — which is the only way to reach it.
+    """
+    from vera.cli import cmd_verify
+    from vera.errors import Diagnostic
+
+    def boom(_path):
+        raise RuntimeError("primary failure")
+
+    def bad_to_dict(self):
+        raise RuntimeError("serialisation is broken too")
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    monkeypatch.setattr(Diagnostic, "to_dict", bad_to_dict)
+    src = tmp_path / "lr.vera"
+    src.write_text("x", encoding="utf-8")
+    rc, out, _ = _run_cmd(cmd_verify, src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), "stdout was EMPTY — the fallback did not engage"
+    payload = json.loads(out)          # must still parse
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["error_code"] == "E699"
+
+
+def test_the_last_resort_fallback_engages_on_the_text_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its text sibling: a broken `.format()` still yields a message."""
+    from vera.cli import cmd_verify
+    from vera.errors import Diagnostic
+
+    def boom(_path):
+        raise RuntimeError("primary failure")
+
+    def bad_format(self):
+        raise RuntimeError("formatting is broken too")
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    monkeypatch.setattr(Diagnostic, "format", bad_format)
+    src = tmp_path / "lt.vera"
+    src.write_text("x", encoding="utf-8")
+    rc, _out, err = _run_cmd(cmd_verify, src, as_json=False)
+
+    assert rc == 1
+    assert "E699" in err
+    assert "Traceback (most recent call last)" not in err
+
+
+@pytest.mark.parametrize("cmd_name,doing", [
+    ("cmd_check", "checking"),
+    ("cmd_verify", "verifying"),
+    ("cmd_test", "testing"),
+])
+def test_every_command_envelopes_a_failing_sibling_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cmd_name: str, doing: str,
+) -> None:
+    """Each command's own `VeraError` handler is inside the backstop's reach.
+
+    Injects INSIDE the handler rather than inside the try, which is the only
+    place that can see this gap: `check` and `test` kept bare handler bodies
+    after `verify`'s were wrapped, and a cell driving `_load_and_parse` sees
+    none of it because that is inside the protected region for all three.
+    """
+    import vera.cli as cli_mod
+    from vera.errors import VeraError
+
+    class _BadDiagnostic:
+        def to_dict(self):
+            raise RuntimeError("diagnostic will not serialise")
+
+        def format(self) -> str:
+            raise RuntimeError("diagnostic will not format")
+
+    err = VeraError.__new__(VeraError)
+    err.diagnostic = _BadDiagnostic()
+
+    def boom(_path):
+        raise err
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    src = tmp_path / "sib.vera"
+    src.write_text("x", encoding="utf-8")
+    rc, out, _ = _run_cmd(getattr(cli_mod, cmd_name), src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), f"{cmd_name}: stdout was EMPTY — the handler's raise escaped"
+    payload = json.loads(out)
+    diag = next(d for d in payload["diagnostics"] if d.get("error_code") == "E699")
+    assert doing in diag["description"]
+    assert "will not serialise" in diag["description"]

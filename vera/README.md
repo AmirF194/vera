@@ -160,7 +160,7 @@ execute(compile_result, ...)    # → run WASM via wasmtime
 | ` ├ emit.py` | 137 | | Browser bundle emission (wasm + runtime + html) | `emit_browser_bundle()` |
 | ` ├ runtime.mjs` | 3,877 | | Self-contained JS runtime: IO, State, Http, Inference, contracts, Markdown, Json, Html | |
 | ` └ harness.mjs` | 106 | | Node.js test harness for parity testing | |
-| `cli.py` | 1,990 | All | CLI commands | `main()` |
+| `cli.py` | 2,224 | All | CLI commands | `main()` |
 | `registration.py` | 126 | Type check | Shared function registration | `register_fn()` |
 
 Total: ~88,000 lines of Python + 344 lines of grammar + 3,983 lines of JavaScript.
@@ -753,7 +753,7 @@ The `ERROR_CODES` dict in `errors.py` maps every code to a short description (16
 
 ## Test Suite
 
-Testing spans a **pytest suite** of 12,282 tests across 181 files: compiler-internals unit tests plus a **conformance suite** (244 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (43 end-to-end demos). The conformance suite is the definitive specification artifact; most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
+Testing spans a **pytest suite** of 12,290 tests across 181 files: compiler-internals unit tests plus a **conformance suite** (244 programs in `tests/conformance/` validating every language feature against the spec) and **example programs** (43 end-to-end demos). The conformance suite is the definitive specification artifact; most programs target a single feature, though some (slot references, match, contracts) span several, and each serves as a minimal working example.
 
 See **[TESTING.md](../TESTING.md)** for the comprehensive testing reference -- test file table, conformance suite details, compiler code coverage, language feature coverage, helper conventions, validation scripts, CI pipeline, and guidelines for adding tests.
 

@@ -122,18 +122,21 @@ def cmd_check(
     explain_slots: bool = False,
 ) -> int:
     """Parse, transform, and type-check a .vera file."""
-    from vera.ast import FnDecl, format_type_expr
-    from vera.checker import typecheck
-    from vera.checker.core import typecheck_with_artifacts
-    from vera.resolver import ModuleResolver
-    from vera.slots import (
-        fn_scopes,
-        format_slot_table,
-        slot_table,
-        slot_table_dict,
-    )
-
     try:
+        # INSIDE the try, as in `cmd_verify`: a function-scope import that fails
+        # (a broken `z3` wheel reached through `vera.checker`) must become an
+        # envelope, not a raw traceback past the backstop (#1361 review).
+        from vera.ast import FnDecl, format_type_expr
+        from vera.checker import typecheck
+        from vera.checker.core import typecheck_with_artifacts
+        from vera.resolver import ModuleResolver
+        from vera.slots import (
+            fn_scopes,
+            format_slot_table,
+            slot_table,
+            slot_table_dict,
+        )
+
         p, source, tree = _load_and_parse(path)
         program = transform(tree)
 
@@ -236,33 +239,49 @@ def cmd_check(
 
         return 0
     except FileNotFoundError:
-        if as_json:
-            err_result: dict[str, object] = {
-                "ok": False, "file": path,
-                "diagnostics": [{"severity": "error",
-                                 "description": f"file not found: {path}",
-                                 "location": {"line": 0, "column": 0}}],
-                "warnings": [],
-            }
-            if explain_slots:
-                err_result["slot_environments"] = []
-            print(json.dumps(err_result, indent=2))
+        # The sibling handlers are inside the backstop's reach too (#1361
+        # review): their own `print` / `json.dumps` / `to_dict` can raise, and an
+        # unenveloped handler failing mid-report is the same empty stdout as no
+        # handler at all.
+        try:
+            if as_json:
+                err_result: dict[str, object] = {
+                    "ok": False, "file": path,
+                    "diagnostics": [{"severity": "error",
+                                     "description": f"file not found: {path}",
+                                     "location": {"line": 0, "column": 0}}],
+                    "warnings": [],
+                }
+                if explain_slots:
+                    err_result["slot_environments"] = []
+                print(json.dumps(err_result, indent=2))
+                return 1
+            print(f"Error: file not found: {path}", file=sys.stderr)
             return 1
-        print(f"Error: file not found: {path}", file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing='checking', as_json=as_json)
     except VeraError as exc:
-        if as_json:
-            err_result = {
-                "ok": False, "file": path,
-                "diagnostics": [exc.diagnostic.to_dict()],
-                "warnings": [],
-            }
-            if explain_slots:
-                err_result["slot_environments"] = []
-            print(json.dumps(err_result, indent=2))
+        # The sibling handlers are inside the backstop's reach too (#1361
+        # review): their own `print` / `json.dumps` / `to_dict` can raise, and an
+        # unenveloped handler failing mid-report is the same empty stdout as no
+        # handler at all.
+        try:
+            if as_json:
+                err_result = {
+                    "ok": False, "file": path,
+                    "diagnostics": [exc.diagnostic.to_dict()],
+                    "warnings": [],
+                }
+                if explain_slots:
+                    err_result["slot_environments"] = []
+                print(json.dumps(err_result, indent=2))
+                return 1
+            print(exc.diagnostic.format(), file=sys.stderr)
             return 1
-        print(exc.diagnostic.format(), file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing='checking', as_json=as_json)
     except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
         return _internal_error_envelope(
             path, exc, doing="checking", as_json=as_json,
@@ -460,12 +479,19 @@ def _internal_error_envelope(
     command boundary.
 
     A real :class:`Diagnostic` rather than a hand-built dict, so the envelope
-    carries the same fields every other diagnostic does — ``source_line``,
-    ``spec_ref`` and the file on the location — and so the text path formats
-    identically to every other error the user sees (PR #1361 review).
+    carries ``spec_ref`` and the file on its location, and so the text path
+    formats identically to every other error the user sees (PR #1361 review).
+    ``source_line`` is deliberately absent: an internal error has no source
+    POSITION to quote, and `to_dict` omits the key rather than emit an empty
+    one — an earlier docstring claimed it, which is the kind of promise a test
+    written from the implementation cannot catch.
 
-    *extra* carries a command's own always-present JSON keys, so its failing
-    envelope keeps the shape its callers parse.
+    *extra* carries a command's own always-present JSON keys.  Only the keys a
+    caller would parse unconditionally are wired; the crash envelope
+    deliberately omits the per-command RESULT shapes (`verification` /
+    `obligations` for verify, the run summary for test) rather than inventing
+    zeroed ones, because there is no result to report and a fabricated empty
+    summary reads as a successful run of nothing.
     """
     diag = Diagnostic(
         description=(
@@ -487,16 +513,38 @@ def _internal_error_envelope(
         severity="error",
         error_code="E699",
     )
-    if as_json:
-        payload: dict[str, object] = {
-            "ok": False, "file": path,
-            "diagnostics": [diag.to_dict()], "warnings": [],
-        }
-        payload.update(extra or {})
-        print(json.dumps(payload, indent=2))
+    try:
+        if as_json:
+            payload: dict[str, object] = {
+                "ok": False, "file": path,
+                "diagnostics": [diag.to_dict()], "warnings": [],
+            }
+            payload.update(extra or {})
+            print(json.dumps(payload, indent=2))
+            return 1
+        print(diag.format(), file=sys.stderr)
         return 1
-    print(diag.format(), file=sys.stderr)
-    return 1
+    except Exception:  # noqa: BLE001 — last resort (#1361 review)
+        # The reporting path is itself the last thing that can fail, and the
+        # envelope is worth nothing if the code emitting it can raise.  So this
+        # leg builds the JSON by hand from strings that cannot fail to
+        # serialise, rather than through `Diagnostic.to_dict` / `.format` — the
+        # one place in this module where a dict literal is the RIGHT shape,
+        # precisely because it depends on nothing that could be broken.
+        if as_json:
+            print(
+                '{"ok": false, "file": %s, "diagnostics": [{"severity": '
+                '"error", "error_code": "E699", "description": %s, '
+                '"location": {"line": 0, "column": 0}}], "warnings": []}'
+                % (json.dumps(str(path)), json.dumps(
+                    f"Internal compiler error while {doing} '{path}': "
+                    f"{type(exc).__name__}"))
+            )
+        else:
+            print(
+                f"Error: [E699] Internal compiler error while {doing} "
+                f"'{path}': {type(exc).__name__}", file=sys.stderr)
+        return 1
 
 
 def _report_compile_failure(
@@ -1505,11 +1553,12 @@ def cmd_test(
     fn_name: str | None = None,
 ) -> int:
     """Parse, type-check, and test a .vera file via contract-driven testing."""
-    from vera.checker import typecheck_with_artifacts
-    from vera.resolver import ModuleResolver
-    from vera.tester import test as run_test
-
     try:
+        # INSIDE the try, as in `cmd_verify` (#1361 review).
+        from vera.checker import typecheck_with_artifacts
+        from vera.resolver import ModuleResolver
+        from vera.tester import test as run_test
+
         p, source, tree = _load_and_parse(path)
         ast = transform(tree)
 
@@ -1686,23 +1735,39 @@ def cmd_test(
         return 1 if s.failed > 0 or has_errors else 0
 
     except FileNotFoundError:
-        if as_json:
-            print(json.dumps({"ok": False, "file": path,
-                              "diagnostics": [{"severity": "error",
-                                               "description": f"file not found: {path}",
-                                               "location": {"line": 0, "column": 0}}]},
-                              indent=2))
+        # The sibling handlers are inside the backstop's reach too (#1361
+        # review): their own `print` / `json.dumps` / `to_dict` can raise, and an
+        # unenveloped handler failing mid-report is the same empty stdout as no
+        # handler at all.
+        try:
+            if as_json:
+                print(json.dumps({"ok": False, "file": path,
+                                  "diagnostics": [{"severity": "error",
+                                                   "description": f"file not found: {path}",
+                                                   "location": {"line": 0, "column": 0}}]},
+                                  indent=2))
+                return 1
+            print(f"Error: file not found: {path}", file=sys.stderr)
             return 1
-        print(f"Error: file not found: {path}", file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing='testing', as_json=as_json)
     except VeraError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "file": path,
-                              "diagnostics": [exc.diagnostic.to_dict()]},
-                              indent=2))
+        # The sibling handlers are inside the backstop's reach too (#1361
+        # review): their own `print` / `json.dumps` / `to_dict` can raise, and an
+        # unenveloped handler failing mid-report is the same empty stdout as no
+        # handler at all.
+        try:
+            if as_json:
+                print(json.dumps({"ok": False, "file": path,
+                                  "diagnostics": [exc.diagnostic.to_dict()]},
+                                  indent=2))
+                return 1
+            print(exc.diagnostic.format(), file=sys.stderr)
             return 1
-        print(exc.diagnostic.format(), file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing='testing', as_json=as_json)
     except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
         return _internal_error_envelope(
             path, exc, doing="testing", as_json=as_json)

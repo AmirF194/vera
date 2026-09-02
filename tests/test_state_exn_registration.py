@@ -1123,9 +1123,10 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     through `transform` → `codegen_compile` — a CHECKER-LESS shortcut.  The
     real toolchain threads the resolver and the checker's artifacts
     (`expr_semantic_types`, `expr_target_types`, `module_artifacts`), and the
-    WAT it produces is not always the same text: measured on this corpus, 52
-    of the 201 programs the toolchain compiles differ from their shortcut
-    build.  The invariant under test (registration ⊇ lowering) is a property
+    WAT it produces is not always the same text: a substantial minority of the
+    corpus differs between the two builds (de-counted for the same reason as
+    the floors below — the proportion moves with every corpus addition and
+    nothing here is gated on it).  The invariant under test (registration ⊇ lowering) is a property
     of the codegen pass both share, but a divergence in the shortcut's favour
     is possible in principle and this sweep would not see it.  Second, it is
     anchored, not exploratory: it holds the invariant over the programs the
