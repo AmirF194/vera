@@ -1106,17 +1106,17 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     Two legs, because the name comparison alone is not the invariant.  The
     symbol-set leg catches an UNDECLARED symbol, over every program in the
     sweep.  The validation leg — handing the HANDLER-BEARING modules (the
-    ones that reference a `state_*` / `exn_*` symbol at all, currently 30 of
-    them; the 31 in the floors below counts distinct SYMBOLS, not modules) to
+    ones that reference a `state_*` / `exn_*` symbol at all; the distinct-symbol
+    floor below counts SYMBOLS, not modules) to
     `wasmtime.Module`, which type-checks the whole thing — catches a symbol
     declared at the WRONG TYPE, which the name comparison reports as
     perfectly balanced: the #1231 shape declared `state_get_Bool` (i32) for a
     call the checker had typed `Int` (i64), and a Byte-literal-into-an-`Int`-
     cell shape declared the right names with mismatched value types.  Both
     passed a name-only differential while being invalid WASM.  The engine is
-    `exceptions_engine()`, not a default one: 10 of those 30 modules fail to
-    load when `wasm_exceptions` is off, which is a supported wasmtime
-    configuration (see that helper for why the current runner, where the
+    `exceptions_engine()`, not a default one: at wasmtime 48.0.0, 12 of those
+    39 modules fail to load when `wasm_exceptions` is off, which is a supported
+    wasmtime configuration (see that helper for why the current runner, where the
     proposal defaults on, does not settle the question).
 
     TWO LIMITS, stated rather than implied.  First, this builds each module

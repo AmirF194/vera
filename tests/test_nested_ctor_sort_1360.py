@@ -1,0 +1,264 @@
+"""#1360: a `Tuple` nested inside a constructor translates, and `--json` always envelopes.
+
+`let @Option<Tuple<Nat, Int>> = Some(Tuple(@Nat.0, 1234));` is `vera check`-green
+and used to kill `vera verify` with a raw `z3.z3types.Z3Exception: Sort mismatch`
+— a Python traceback, exit 1 — while `vera compile` and `vera run` handled it
+fine.  Under `--json` the process emitted NO envelope at all, so a machine
+consumer got empty stdout where it expects a diagnostic object.
+
+TWO HALVES, deliberately independent.
+
+1. THE TRANSLATION DEFECT.  The two sorts are derived by different routes and
+   disagree.  A nested `Tuple` argument is built by the variadic-tuple branch of
+   `_translate_ctor_call`, which keys its synthesised sort on the arguments'
+   Z3 sorts — and `Nat` reads back as `Int`, since both are one `IntSort` — so it
+   always spells `Int`.  The enclosing `Some`'s sort is resolved through
+   `_resolve_pinned_sort`, which prefers a cached instantiation equal to the pin
+   MODULO `Nat`<->`Int`.  That preference is sound at a SCALAR position, where
+   the two spellings share one Z3 sort, and unsound at a position that is itself
+   a datatype: post-#884 `Tuple<Int, Nat>` and `Tuple<Int, Int>` are distinct
+   injective sorts.  So the constructor's domain named one datatype and the
+   argument term was built as the other.  Measured at the crash:
+
+       arg sort   : Tuple_LInt_CInt_R      (what the term was built as)
+       ctor domain: Tuple_LInt_CNat_R      (what the resolved sort expects)
+
+   Note the `Nat` appears even in an all-`Int` program: the literal `1234` types
+   as `Nat` on the Vera side, so the declared-side materialisation spells
+   `Tuple<Int, Nat>` while the SMT side spells `Tuple<Int, Int>`.  That is why
+   the all-`Int` spelling crashed too, and why the trigger is `Tuple` NESTED in a
+   constructor rather than anything about `Nat`.
+
+   The fix asks, before applying a resolved constructor, whether it can actually
+   take the arguments that were built; if not it prefers the instantiation those
+   arguments pin, and failing that returns None — an untranslatable ctor, the
+   Tier-3 demotion every other `return None` on that path already means.
+
+2. THE ENVELOPE GUARANTEE, which does not depend on part 1 being right.  Any
+   exception escaping `cmd_verify` now becomes an `E699` envelope rather than
+   empty stdout.  Its cell drives the failure by monkeypatching a translation
+   function to raise, so the contract is pinned independently of this particular
+   crash — a future translator bug is a diagnostic, not a traceback.
+
+CONTROLS.  Same-ADT nesting (`Some(Some(...))`) did NOT crash before the fix —
+measured, not assumed — so it pins that the repair is confined to the disagreeing
+sorts rather than to nesting in general; a bare `Tuple` and a ctor over a slot
+likewise verified before and must still.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+import vera
+
+# Run the SAME compiler this session imported: in a linked worktree a bare
+# `python -m vera.cli` would resolve whatever the editable install points at.
+_PKG_PARENT = str(Path(vera.__file__).resolve().parents[1])
+
+# The tuple's second component.  A positive literal, which is the detail that
+# makes the declared side spell `Nat` where the SMT side spells `Int` — the
+# disagreement under test.  Distinctive so a value read off the wrong component
+# cannot pass for the right one.
+_SECOND = 1234
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{_PKG_PARENT}{os.pathsep}{existing}" if existing else _PKG_PARENT
+    )
+    return subprocess.run(
+        [sys.executable, "-m", "vera.cli", *args],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+        env=env, timeout=300,
+    )
+
+
+def _verify_json(tmp_path: Path, source: str, name: str = "p.vera") -> dict:
+    """`vera verify --json` for *source*.
+
+    Surfaces a crash as itself: the whole point of these cells is that stdout
+    is parseable JSON on every exit path, so a `JSONDecodeError` here IS the
+    regression and must not be reported as a bare parser error.
+    """
+    p = tmp_path / name
+    p.write_text(source, encoding="utf-8")
+    proc = _cli("verify", "--json", str(p))
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError(
+            f"`verify --json` emitted no parseable envelope (exit "
+            f"{proc.returncode})\nstdout: {proc.stdout[:600]!r}\n"
+            f"stderr: {proc.stderr[-900:]}"
+        ) from None
+
+
+def _program(param: str, declared: str, value: str) -> str:
+    return textwrap.dedent(f"""\
+        public fn f({param} -> @Int)
+          requires(true) ensures(true) effects(pure)
+        {{
+          let {declared} = {value};
+          0
+        }}
+        """)
+
+
+# The issue's own repro.
+_REPRO = _program("@Nat", "@Option<Tuple<Nat, Int>>",
+                  f"Some(Tuple(@Nat.0, {_SECOND}))")
+
+
+# ---------------------------------------------------------------------------
+# 1. The crash is gone, and the program gets real verdicts
+# ---------------------------------------------------------------------------
+
+def test_tuple_nested_in_constructor_does_not_crash(tmp_path: Path) -> None:
+    """The issue's repro verifies instead of raising a raw Z3 exception."""
+    result = _verify_json(tmp_path, _REPRO)
+    assert result["ok"] is True, (
+        f"diagnostics: {[d.get('error_code') for d in result['diagnostics']]}"
+    )
+    assert "E699" not in [d.get("error_code") for d in result["diagnostics"]]
+
+
+def test_the_repro_obligations_are_discharged(tmp_path: Path) -> None:
+    """And the obligations get genuine statuses, not an empty stream.
+
+    A translation that silently returned None everywhere would also stop the
+    crash while proving nothing, so the statuses are the assertion: both
+    contract obligations discharge at Tier 1 and none is left undischarged.
+    """
+    result = _verify_json(tmp_path, _REPRO)
+    statuses = {o["kind"]: o["status"] for o in result["obligations"]}
+    assert statuses == {"requires": "verified", "ensures": "verified"}, statuses
+    assert result["verification"]["tier1_verified"] == 2
+    assert result["verification"]["tier3_runtime"] == 0
+
+
+def test_the_crashing_shape_still_compiles_and_runs(tmp_path: Path) -> None:
+    """`compile`/`run` were always fine here; the fix must not disturb them."""
+    p = tmp_path / "r.vera"
+    p.write_text(_REPRO, encoding="utf-8")
+    proc = _cli("run", str(p), "--fn", "f", "--", "3")
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert proc.stdout.strip() == "0"
+
+
+@pytest.mark.parametrize("param,declared,value", [
+    # All-`Int` spelling: crashed too, because the literal types as `Nat` on
+    # the declared side.  Pins that the trigger is the nesting, not `Nat`.
+    ("@Int", "@Option<Tuple<Int, Int>>", f"Some(Tuple(@Int.0, {_SECOND}))"),
+    # All-`Nat` spelling, the other end of the same axis.
+    ("@Nat", "@Option<Tuple<Nat, Nat>>", "Some(Tuple(@Nat.0, @Nat.0))"),
+])
+def test_every_tuple_in_constructor_spelling_translates(
+    tmp_path: Path, param: str, declared: str, value: str,
+) -> None:
+    """Each `Tuple`-in-constructor spelling verifies, whatever its components."""
+    result = _verify_json(tmp_path, _program(param, declared, value))
+    assert result["ok"] is True, (
+        f"{declared}: {[d.get('error_code') for d in result['diagnostics']]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. Controls — shapes that were already correct
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("param,declared,value", [
+    # Same-ADT nesting.  MEASURED as passing before the fix, so it marks the
+    # boundary: the defect was the disagreeing sorts, not nesting as such.
+    ("@Int", "@Option<Option<Int>>", "Some(Some(@Int.0))"),
+    ("@Nat", "@Option<Option<Nat>>", "Some(Some(@Nat.0))"),
+    # A bare tuple, and a constructor over a plain slot.
+    ("@Nat", "@Tuple<Nat, Int>", f"Tuple(@Nat.0, {_SECOND})"),
+    ("@Nat", "@Option<Nat>", "Some(@Nat.0)"),
+])
+def test_shapes_that_already_worked_are_unchanged(
+    tmp_path: Path, param: str, declared: str, value: str,
+) -> None:
+    """Each verified cleanly before the fix and must still."""
+    result = _verify_json(tmp_path, _program(param, declared, value))
+    assert result["ok"] is True, (
+        f"{declared}: {[d.get('error_code') for d in result['diagnostics']]}"
+    )
+    assert result["verification"]["tier1_verified"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 3. The envelope guarantee, independent of the crash above
+# ---------------------------------------------------------------------------
+
+def _envelope_for_raising_translator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    *, as_json: bool,
+) -> tuple[int, str, str]:
+    """Run `cmd_verify` in-process with the SMT translator forced to raise.
+
+    In-process rather than through the CLI subprocess because the point is to
+    drive an ARBITRARY translator failure, not this one bug's: monkeypatching
+    is what makes the guarantee independent of `#1360`'s particular exception.
+    """
+    from vera import smt as smt_mod
+    from vera.cli import cmd_verify
+
+    def boom(self, expr, env):
+        raise RuntimeError("synthetic translator failure")
+
+    monkeypatch.setattr(smt_mod.SmtContext, "translate_expr", boom)
+    p = tmp_path / "e.vera"
+    p.write_text(
+        _program("@Int", "@Int", "@Int.0"), encoding="utf-8")
+    capsys.readouterr()
+    rc = cmd_verify(str(p), as_json=as_json)
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def test_json_envelope_survives_an_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`verify --json` emits a parseable E699 envelope, never empty stdout.
+
+    The contract a machine consumer relies on: stdout is always a JSON object,
+    so a crash is distinguishable from a clean run.  Empty stdout is the
+    regression this pins.
+    """
+    rc, out, _ = _envelope_for_raising_translator(
+        tmp_path, monkeypatch, capsys, as_json=True)
+    assert rc == 1
+    assert out.strip(), "stdout was EMPTY — no envelope on the failing path"
+    payload = json.loads(out)          # must parse
+    assert payload["ok"] is False
+    assert payload["file"].endswith("e.vera")
+    codes = [d.get("error_code") for d in payload["diagnostics"]]
+    assert "E699" in codes, payload["diagnostics"]
+    diag = next(d for d in payload["diagnostics"] if d.get("error_code") == "E699")
+    assert "synthetic translator failure" in diag["description"]
+    assert diag["severity"] == "error"
+    assert diag["rationale"] and diag["fix"]
+
+
+def test_text_mode_reports_the_internal_error_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The human path is a message, not a Python stack trace."""
+    rc, _, err = _envelope_for_raising_translator(
+        tmp_path, monkeypatch, capsys, as_json=False)
+    assert rc == 1
+    assert "Internal compiler error" in err
+    assert "synthetic translator failure" in err
+    assert "Traceback (most recent call last)" not in err

@@ -414,6 +414,46 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False,
             return 1
         print(exc.diagnostic.format(), file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
+        # Every exit path of `verify --json` emits a parseable envelope.
+        # Anything reaching here is a compiler bug rather than a property of
+        # the program, but a consumer that gets EMPTY stdout cannot tell a
+        # crash from a clean run — it sees no diagnostics either way — so the
+        # machine-readable contract has to hold on the failing path too.  This
+        # is the E699 posture `vera/skip.py` documents for codegen invariants,
+        # applied at the verify entry point: never caught in development,
+        # caught at the top level in production so a raw traceback is not the
+        # user's error report.  #1360 arrived here as a raw
+        # `z3.z3types.Z3Exception: Sort mismatch` from the SMT translator; the
+        # translation defect itself is fixed, and this keeps the NEXT one a
+        # diagnostic rather than a traceback.
+        msg = (
+            f"Internal compiler error while verifying '{path}': "
+            f"{type(exc).__name__}: {exc}"
+        )
+        if as_json:
+            print(json.dumps({
+                "ok": False,
+                "file": path,
+                "diagnostics": [{
+                    "severity": "error",
+                    "description": msg,
+                    "location": {"line": 0, "column": 0},
+                    "rationale": "The verifier raised an unexpected exception. "
+                                 "This is a compiler bug, not a property of "
+                                 "the program under verification.",
+                    "fix": "Please file a bug report with the offending "
+                           "program at "
+                           "https://github.com/aallan/vera/issues",
+                    "error_code": "E699",
+                }],
+                "warnings": [],
+            }, indent=2))
+            return 1
+        print(f"Error: {msg}", file=sys.stderr)
+        print("  This is a compiler bug. Please file a report at "
+              "https://github.com/aallan/vera/issues", file=sys.stderr)
+        return 1
 
 
 def _report_compile_failure(

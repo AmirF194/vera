@@ -270,6 +270,20 @@ def _adt_sort_key(adt_name: str, type_args: tuple[Type, ...]) -> str:
     return f"{adt_name}<{', '.join(arg_strs)}>"
 
 
+def _ctor_accepts(ctor: z3.FuncDeclRef, args: list[z3.ExprRef]) -> bool:
+    """Whether *ctor* can be applied to *args* without a Z3 sort mismatch.
+
+    Asked before applying a resolved constructor, because the sort a
+    constructor was resolved to and the sorts its arguments were BUILT as are
+    derived by different routes and can disagree (#1360).  Z3 raises rather
+    than returning an error for that, and the raise escaped `vera verify` as a
+    bare traceback.
+    """
+    if ctor.arity() != len(args):
+        return False
+    return all(ctor.domain(i).eq(a.sort()) for i, a in enumerate(args))
+
+
 def _normalize_int_nat_sort_key(key: str) -> str:
     """Canonicalise an ``_adt_sort_key`` for ``Nat``<->``Int`` carrier equality
     (#918).
@@ -3125,7 +3139,40 @@ class SmtContext:
         idx = self._find_ctor_index(sort, expr.name)
         if idx is None:  # pragma: no cover
             return None
-        return sort.constructor(idx)(*z3_args)
+        ctor = sort.constructor(idx)
+        if not _ctor_accepts(ctor, z3_args):
+            # #1360: the resolved instantiation cannot take the arguments that
+            # were actually built.  `_resolve_pinned_sort` may answer with a
+            # cached instantiation equal to the pin only MODULO ``Nat``<->``Int``
+            # — sound at a scalar position, where both spell one Z3 ``IntSort``,
+            # but not at a position that is itself a datatype: post-#884
+            # ``Tuple<Int, Nat>`` and ``Tuple<Int, Int>`` are distinct injective
+            # sorts.  A nested ctor argument is built from its OWN argument
+            # sorts (``Nat`` reads back as ``Int``, so always the ``Int``
+            # spelling) while the outer domain came from the declared side,
+            # where a non-negative literal types as ``Nat`` — so the two
+            # disagree and applying the constructor raised a raw Z3
+            # ``Sort mismatch`` out of `vera verify`.
+            #
+            # Prefer the instantiation the arguments themselves pin, then give
+            # up rather than crash: an untranslatable ctor is a Tier-3
+            # demotion the callers already handle, which is what every other
+            # `return None` on this path means.
+            adt_name = self._ctor_to_adt.get(expr.name)
+            exact = (
+                self._get_or_create_adt_sort(adt_name, type_args)
+                if adt_name is not None and type_args is not None
+                else None
+            )
+            if exact is None:
+                return None
+            exact_idx = self._find_ctor_index(exact, expr.name)
+            if exact_idx is None:  # pragma: no cover — same ctor, same ADT
+                return None
+            ctor = exact.constructor(exact_idx)
+            if not _ctor_accepts(ctor, z3_args):
+                return None
+        return ctor(*z3_args)
 
     def _type_expr_to_adt_type(self, te: ast.TypeExpr) -> Type | None:
         """Resolve a parameter type expression naming a registered ADT to its
