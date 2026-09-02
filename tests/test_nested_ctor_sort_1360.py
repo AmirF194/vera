@@ -58,6 +58,8 @@ from pathlib import Path
 import pytest
 
 import vera
+import z3
+from vera.smt import SmtContext, _ctor_accepts
 
 # Run the SAME compiler this session imported: in a linked worktree a bare
 # `python -m vera.cli` would resolve whatever the editable install points at.
@@ -262,3 +264,90 @@ def test_text_mode_reports_the_internal_error_without_a_traceback(
     assert "Internal compiler error" in err
     assert "synthetic translator failure" in err
     assert "Traceback (most recent call last)" not in err
+
+
+# ---------------------------------------------------------------------------
+# 4. The guard predicate answers rather than raises
+# ---------------------------------------------------------------------------
+#
+# `_ctor_accepts` exists to intercept Z3's raise-instead-of-error behaviour, so
+# a predicate that can itself raise defeats its own purpose: the traceback the
+# envelope above catches would be coming from the very code written to stop it.
+# Its sibling `_sorts_agree` already wraps the identical accessors.  `False` —
+# "does not accept" — is the conservative answer, and routes to the decline
+# path rather than to an application that would raise.
+
+class _HostileCtor:
+    """A constructor-like object whose accessors raise, as Z3's can.
+
+    Each accessor `_ctor_accepts` touches gets its own instance, so a cell
+    names exactly which unguarded call it is about.
+    """
+
+    def __init__(self, raise_on: str, arity: int = 1) -> None:
+        self._raise_on = raise_on
+        self._arity = arity
+
+    def arity(self) -> int:
+        if self._raise_on == "arity":
+            raise z3.Z3Exception("hostile arity")
+        return self._arity
+
+    def domain(self, i: int) -> object:
+        if self._raise_on == "domain":
+            raise z3.Z3Exception("hostile domain")
+        return _HostileSort(raise_on=None)
+
+
+class _HostileSort:
+    def __init__(self, raise_on: str | None) -> None:
+        self._raise_on = raise_on
+
+    def eq(self, other: object) -> bool:
+        return False
+
+
+class _HostileArg:
+    """An argument whose `sort()` raises."""
+
+    def sort(self) -> object:
+        raise z3.Z3Exception("hostile sort")
+
+
+@pytest.mark.parametrize("raise_on", ["arity", "domain"])
+def test_ctor_accepts_answers_false_when_the_ctor_raises(raise_on: str) -> None:
+    """A raising `arity()` / `domain()` is answered, not propagated.
+
+    Red against the unguarded predicate: the `z3.Z3Exception` escapes
+    `_ctor_accepts` and unwinds into `_translate_ctor_call`, which is exactly
+    the shape this helper was added to prevent.
+    """
+    ctor = _HostileCtor(raise_on=raise_on)
+    assert _ctor_accepts(ctor, [_ok_arg()]) is False
+
+
+def test_ctor_accepts_answers_false_when_an_arg_sort_raises() -> None:
+    """The third accessor: a raising `a.sort()` is answered too."""
+    assert _ctor_accepts(_HostileCtor(raise_on=None), [_HostileArg()]) is False
+
+
+def test_ctor_accepts_still_discriminates_on_real_terms() -> None:
+    """The guard must not answer `False` to everything.
+
+    Without this the cells above are satisfied by a predicate that swallowed
+    its body entirely — and a guard that always declines would demote every
+    constructor translation to Tier 3 while still passing them.
+    """
+    ctx = SmtContext()
+    sort = z3.Datatype("Pair")
+    sort.declare("mk", ("fst", z3.IntSort()), ("snd", z3.IntSort()))
+    pair = sort.create()
+    mk = pair.constructor(0)
+    assert _ctor_accepts(mk, [z3.IntVal(1), z3.IntVal(2)]) is True
+    assert _ctor_accepts(mk, [z3.IntVal(1)]) is False           # wrong arity
+    assert _ctor_accepts(mk, [z3.IntVal(1), z3.BoolVal(True)]) is False
+    del ctx
+
+
+def _ok_arg() -> z3.ExprRef:
+    return z3.IntVal(0)

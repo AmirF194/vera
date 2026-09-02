@@ -286,10 +286,20 @@ def _ctor_accepts(ctor: z3.FuncDeclRef, args: list[z3.ExprRef]) -> bool:
     derived by different routes and can disagree (#1360).  Z3 raises rather
     than returning an error for that, and the raise escaped `vera verify` as a
     bare traceback.
+
+    Its own accessors are wrapped for the same reason, mirroring
+    :func:`_sorts_agree` above: a predicate written to intercept Z3's raises
+    must not be able to raise itself, or the traceback it exists to prevent
+    comes from the guard.  ``False`` — "does not accept" — is the conservative
+    answer, and routes to the decline path rather than to an application that
+    would raise anyway.
     """
-    if ctor.arity() != len(args):
+    try:
+        if ctor.arity() != len(args):
+            return False
+        return all(ctor.domain(i).eq(a.sort()) for i, a in enumerate(args))
+    except (AttributeError, z3.Z3Exception):
         return False
-    return all(ctor.domain(i).eq(a.sort()) for i, a in enumerate(args))
 
 
 def _normalize_int_nat_sort_key(key: str) -> str:
