@@ -16,12 +16,13 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## The v0.1.14 burndown
 
-*Eighteen open bugs, driven to zero.*
+*Nineteen open bugs, driven to zero.*
 
 A bug class outranks stage work, so the next release takes the open `bug`-labelled set as its queue.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) carries each row's full account and stays the one place the detail lives; this table is the order of attack.  The check-green-then-broken rows lead it: a program that passes every static stage and then loses its exports, or drops the caller that needed it, fails where a reader has no way to anticipate.
 
 | Issue | What |
 |---|---|
+| [#1362](https://github.com/aallan/vera/issues/1362) | **Accounting.** A handler-clause `@Nat` payload narrowing counts as runtime-guarded while nothing guards it and nothing discloses it, so a negative returns untrapped from a verify-clean program. |
 | [#1331](https://github.com/aallan/vera/issues/1331) | A user `data` declaration named after a built-in container compiles at the container's width, so a check-green program loses its exports to an E602 refusal. |
 | [#1315](https://github.com/aallan/vera/issues/1315) | The checker accepts a constructor pattern over a container ADT that has no constructors. |
 | [#1320](https://github.com/aallan/vera/issues/1320) | The checker admits literal patterns over scrutinees that can never match them — the general disease behind #1315. |
