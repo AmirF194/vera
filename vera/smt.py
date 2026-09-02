@@ -270,6 +270,14 @@ def _adt_sort_key(adt_name: str, type_args: tuple[Type, ...]) -> str:
     return f"{adt_name}<{', '.join(arg_strs)}>"
 
 
+def _sorts_agree(a: z3.ExprRef, b: z3.ExprRef) -> bool:
+    """Whether two terms share a Z3 sort, so an ``If`` can join them (#1360)."""
+    try:
+        return bool(a.sort().eq(b.sort()))
+    except (AttributeError, z3.Z3Exception):
+        return False
+
+
 def _ctor_accepts(ctor: z3.FuncDeclRef, args: list[z3.ExprRef]) -> bool:
     """Whether *ctor* can be applied to *args* without a Z3 sort mismatch.
 
@@ -1568,6 +1576,16 @@ class SmtContext:
         self._path_conditions.pop()
 
         if then is None or else_ is None:
+            return None
+        if not _sorts_agree(then, else_):
+            # #1360, second site: the two arms carry the same Vera type spelled
+            # into DIFFERENT Z3 datatype sorts — a locally-built
+            # `Tuple<Int, Int>` beside a callee's declared `Tuple<Int, Nat>`,
+            # since `Nat` reads back as `Int` from a Z3 sort but types as `Nat`
+            # on the declared side.  `z3.If` raises on that rather than
+            # returning an error, which escaped `vera verify` as a bare
+            # traceback.  Declining to translate is the Tier-3 demotion every
+            # other `return None` here already means.
             return None
         return z3.If(cond, then, else_)
 

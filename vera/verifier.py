@@ -97,17 +97,52 @@ _OPAQUE_SCRUTINEE_REASON = (
 )
 
 
-def _is_ctor_application(term: object, sort: object) -> bool:
-    """True when *term* is one of *sort*'s constructors applied to arguments.
+def _is_locally_constructed(term: object, sort: object) -> bool:
+    """True when *term* is, or can be, a constructor applied HERE.
 
     The semantic form of the literal-scrutinee test in
     :py:meth:`ContractVerifier._subpattern_source_facts`, which asks the same
     question of the scrutinee's AST.  A `let`-bound tuple reaches the match as a
     slot reference — not syntactically a constructor call — while its Z3 term is
     still ``Tuple(@Int.0, 5)``, so only the term can answer it (#1332).
+
+    THE BOUNDARY.  A component fact read off the declared type is sound exactly
+    when something *other than the obligation under proof* established it.  A
+    value produced by a call or handed in as a parameter qualifies: its own
+    construction obligation was discharged in the callee's context, so its
+    declared type is a fact here.  A value CONSTRUCTED in this body does not:
+    its narrowing obligation is still outstanding, and assuming the fact would
+    discharge that obligation with itself.
+
+    So the question is not "is this term literally ``C(args)``" but "can this
+    term be a construction performed here", and a branch joins the two: an
+    ``ite`` term is a construction on whichever arm constructs.  Without the
+    ``ite`` leg a branch launders the whole test — `if c then Tuple(@Int.0, 5)
+    else Tuple(@Int.0, 6)` is not itself a constructor application, so the facts
+    were emitted and both arms' obligations self-proved while the compiled
+    program trapped (#1332 review round).
+
+    ``any`` rather than ``all`` is the CONSERVATIVE reading, not a measured
+    necessity: the fact is asserted about the whole term unconditionally, so one
+    outstanding arm is in principle enough to discharge that arm's own
+    obligation under its path condition.  Probed directly — a mixed ``ite``
+    (one locally-constructed arm, one produced by a call) over a non-generic
+    single-constructor ADT, where both arms genuinely share a sort — the
+    constructed arm's obligation is refuted under BOTH readings, so no
+    laundering mixed shape was found.  ``any`` is kept because its measured cost
+    is zero (identical shape matrix, identical corpus) and it is the reading
+    that cannot be wrong if such a shape exists.
+
+    Dropping the fact costs nothing where the other arm is grounded: whatever
+    grounds it still grounds it directly.
     """
     try:
         decl = term.decl()  # type: ignore[attr-defined]
+        if decl.kind() == z3.Z3_OP_ITE:
+            return any(
+                _is_locally_constructed(term.arg(i), sort)  # type: ignore[attr-defined]
+                for i in (1, 2)
+            )
         return any(
             decl == sort.constructor(i)  # type: ignore[attr-defined]
             for i in range(sort.num_constructors())  # type: ignore[attr-defined]
@@ -7353,9 +7388,15 @@ class ContractVerifier:
         recursion descends the (finite) pattern AST — each step is a strict
         sub-pattern — so it terminates without a backstop (CR PR-review).
 
-        Carries the anti-circularity test in its term form: a scrutinee that IS
-        a constructor application yields no facts, at this level and at every
-        nested one (#1332)."""
+        Carries the anti-circularity test in its term form: a scrutinee that is
+        constructed HERE — directly, or on either arm of a branch — yields no
+        facts (#1332).  The test answers on the scrutinee this call was given,
+        which in practice means the outer one: the recursion hands each nested
+        level an ACCESSOR applied to that term, and an accessor application is
+        neither a constructor application nor an ``ite``, so a nested level's
+        answer is always "not constructed here".  A nested field of a locally
+        constructed scrutinee is already covered, because the outer call
+        returned before recursing."""
         if scrut_term is None:
             return []
         field_types = self._instantiated_field_types(pattern.name, scrut_ty)
@@ -7368,7 +7409,7 @@ class ContractVerifier:
             return []
         if idx is None:
             return []
-        if _is_ctor_application(scrut_term, sort):
+        if _is_locally_constructed(scrut_term, sort):
             # #1332: the scrutinee was BUILT here, so its components are the
             # concrete arguments of that construction — each still carrying its
             # own narrowing obligation.  A source fact read off the declared

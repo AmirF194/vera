@@ -494,3 +494,138 @@ def test_opaque_scrutinee_still_carries_its_declared_facts(tmp_path: Path) -> No
         f"{[d.get('error_code') for d in result['diagnostics']]}"
     )
     assert all(o["status"] != "violated" for o in result["obligations"])
+
+
+# ---------------------------------------------------------------------------
+# 7. The laundering matrix: every way of PRODUCING the scrutinee
+# ---------------------------------------------------------------------------
+#
+# A guard that asks "is this term literally `C(args)`" is defeated by anything
+# that wraps the construction.  The first version of this fix was: an `if`
+# producing the tuple launders straight past it, and both invariants named
+# above — the destructure not changing the verdict, and construction agreeing
+# with return position — break on that six-line program.  So the suite is
+# parametrised over SCRUTINEE SHAPE rather than carrying one spelling, because
+# a single shape can only ever pin the spelling someone happened to think of.
+#
+# Each shape is paired with a family (`@Nat` and refined) since the two travel
+# through different obligation kinds and the refined one has no runtime guard
+# at all.
+
+_FAMILY = {
+    # family: (prelude, component type, binder, arm body, obligation kind)
+    "nat": ("", "Nat", "@Nat", "nat_to_int(@Nat.0)", "nat_bind"),
+    "refined": ("type PosInt = { @Int | @Int.0 > 0 };\n\n", "PosInt",
+                "@PosInt", "@PosInt.0", "refine_bind"),
+}
+
+# A helper whose OWN construction obligation is discharged internally (it
+# builds from a literal), so its result's component fact is legitimately
+# grounded by the declared return type.  This is the boundary the guard must
+# respect: a call-produced value's facts are established elsewhere, a locally
+# constructed value's are still outstanding.
+_MK = ("private fn mk(@Int -> @Tuple<{comp}, Int>)\n"
+       "  requires(true) ensures(true) effects(pure)\n"
+       "{{\n  Tuple(7, 9)\n}}\n\n")
+
+_LETS = {
+    "bare_ctor": "  let @{T} = Tuple(@Int.0, 5);\n",
+    # The branch that defeated the first guard.
+    "ite_both_ctor": ("  let @{T} = if @Int.0 > 100 then {{ Tuple(@Int.0, 5) }}"
+                      " else {{ Tuple(@Int.0, 6) }};\n"),
+    # One constructed arm, one call-produced.  `< 100` so a negative input
+    # reaches the CONSTRUCTED arm — under `> 100` that arm is guarded by a
+    # condition already implying non-negativity and measures nothing.
+    "ite_mixed": ("  let @{T} = if @Int.0 < 100 then {{ Tuple(@Int.0, 5) }}"
+                  " else {{ mk(@Int.0) }};\n"),
+    "match_produced": ("  let @{T} = match @Int.0 > 100 {{"
+                       " true -> Tuple(@Int.0, 5),"
+                       " false -> Tuple(@Int.0, 6) }};\n"),
+    "let_of_let": ("  let @{T} = Tuple(@Int.0, 5);\n"
+                   "  let @{T} = @{T}.0;\n"),
+    # CONTROL: grounded elsewhere, so the facts must be KEPT.
+    "call_produced": "  let @{T} = mk(@Int.0);\n",
+}
+
+_LAUNDERABLE = ["bare_ctor", "ite_both_ctor", "ite_mixed", "match_produced",
+                "let_of_let"]
+
+
+def _shaped(shape: str, family: str) -> str:
+    prelude, comp, binder, body, _kind = _FAMILY[family]
+    T = f"Tuple<{comp}, Int>"
+    helper = (_MK.format(comp=comp)
+              if shape in ("ite_mixed", "call_produced") else "")
+    let = _LETS[shape].format(T=T)
+    return (
+        f"{prelude}{helper}"
+        f"public fn f(@Int -> @Int)\n"
+        f"  requires(true) ensures(true) effects(pure)\n"
+        f"{{\n{let}"
+        f"  match @{T}.0 {{ Tuple({binder}, @Int) -> {body} }}\n}}\n"
+    )
+
+
+@pytest.mark.parametrize("shape", _LAUNDERABLE)
+@pytest.mark.parametrize("family", ["nat", "refined"])
+def test_no_shape_launders_the_construction_obligation(
+    tmp_path: Path, shape: str, family: str,
+) -> None:
+    """However the scrutinee is produced, a local construction stays obligated.
+
+    Red at `600f5ac5` for `ite_both_ctor` and `match_produced` (both families:
+    reported `verified`, and the `@Nat` pair trapped at run time while the
+    refined pair returned a value its own type forbids), and for `ite_mixed`,
+    which crashed the verifier outright.
+    """
+    kind = _FAMILY[family][4]
+    result = _verify(tmp_path, _shaped(shape, family), name="s.vera")
+    binds = [o for o in result["obligations"] if o["kind"] == kind]
+    assert binds, f"{shape}/{family}: no {kind} obligation was recorded at all"
+    assert any(o["status"] == "violated" for o in binds), (
+        f"{shape}/{family}: {[o['status'] for o in binds]} — a narrowing "
+        f"nothing establishes was not refuted"
+    )
+    assert result["ok"] is False
+
+
+@pytest.mark.parametrize("shape", _LAUNDERABLE)
+@pytest.mark.parametrize("family", ["nat", "refined"])
+def test_no_shape_is_proved_and_then_wrong(
+    tmp_path: Path, shape: str, family: str,
+) -> None:
+    """The soundness differential, over every shape.
+
+    Verify-clean must imply the program is right on the value the narrowing
+    forbids: for `@Nat` that means no trap, for the refined family — which has
+    no runtime guard — that means not returning the forbidden value.
+    """
+    source = _shaped(shape, family)
+    result = _verify(tmp_path, source, name="s.vera")
+    if result["ok"] is not True:
+        return  # refused: the compiler made no claim to contradict
+    proc = _run(tmp_path, source, _NEGATIVE, name="s.vera")
+    assert not _traps(proc), f"{shape}/{family}: proved, and trapped"
+    assert proc.stdout.strip() != str(_NEGATIVE), (
+        f"{shape}/{family}: proved, and returned {_NEGATIVE} — a value the "
+        f"program's own type forbids"
+    )
+
+
+@pytest.mark.parametrize("family", ["nat", "refined"])
+def test_a_call_produced_scrutinee_keeps_its_facts(
+    tmp_path: Path, family: str,
+) -> None:
+    """CONTROL: the over-rejection boundary.
+
+    `mk`'s result is grounded by its declared return type — its own
+    construction obligation was discharged inside `mk` — so the facts are
+    legitimate here and must survive.  Without this cell the matrix above
+    would be satisfied by a guard that simply dropped every fact.
+    """
+    result = _verify(tmp_path, _shaped("call_produced", family), name="c.vera")
+    assert result["ok"] is True, (
+        f"{family}: a grounded scrutinee was refused — "
+        f"{[d.get('error_code') for d in result['diagnostics']]}"
+    )
+    assert all(o["status"] != "violated" for o in result["obligations"])
