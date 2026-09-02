@@ -28,7 +28,7 @@ from vera.monomorphize import (
 )
 from vera.naming import EMPTY_ALIAS_ENV, AliasEnv
 from vera.skip import DERIVED_HELPER_DEPTH_CAP
-from vera.slots import type_expr_slot_name
+from vera.slots import effect_op_result_names, type_expr_slot_name
 
 # Types that satisfy the built-in abilities.  #773: `Eq` is structural, so a
 # field of ANY of these — String included (compared by content) — is
@@ -1031,16 +1031,62 @@ class MonomorphizationMixin:
         decls_by_name: dict[str, ast.FnDecl],
         ctor_to_adt: dict[str, str],
         instances: dict[str, set[tuple[str, ...]]],
+        op_result_types: dict[str, str] | None = None,
     ) -> None:
-        """Total AST walk collecting ``path::gen(...)`` instantiation sites."""
+        """Total AST walk collecting ``path::gen(...)`` instantiation sites.
+
+        #1310: unlike ``Monomorphizer._collect_calls`` (the unshadowed-generic
+        discovery walk), this one had no ``HandleExpr`` arm, so a qualified-only
+        generic's argument type inferred from an effect-operation result
+        (``idg(get(()))`` inside ``handle[State<Int>]``) reached
+        ``_mono_infer_shadowed`` with no operation-result registry at all and
+        silently fell to the phantom-var ``Bool`` default: the wrong
+        instantiation, discovered instead of ``idg$Int``. *op_result_types*
+        threads the same merge-not-swap scoping ``_collect_calls`` already does
+        (#1207), one node at a time since each qualified call gets its own
+        throwaway ``Monomorphizer`` rather than a shared walk-scoped one.
+        """
         from dataclasses import fields as _fields
+
+        if op_result_types is None:
+            op_result_types = {}
+
+        if isinstance(node, ast.HandleExpr):
+            # Same field-drift guard as ``Monomorphizer._collect_calls``: this
+            # arm hand-enumerates HandleExpr's children because they are
+            # walked in different scopes, so a field added to the dataclass
+            # without a matching edit here would go silently unwalked, a
+            # missed generic call with no diagnostic pointing at this line.
+            enumerated = {"effect", "state", "clauses", "body"}
+            declared = {f.name for f in _fields(node)} - {"span"}
+            if declared != enumerated:  # pragma: no cover: guard
+                msg = (
+                    f"HandleExpr fields changed: {sorted(declared)}; this arm "
+                    f"walks {sorted(enumerated)}.  Add the new field to the "
+                    f"enclosing-scope group or to the handler-scope body walk, "
+                    f"an unwalked child hides every generic call inside it."
+                )
+                raise AssertionError(msg)
+            for child in (node.effect, node.state, node.clauses):
+                self._collect_shadowed_qualified_calls(
+                    child, path, decls_by_name, ctor_to_adt, instances,
+                    op_result_types,
+                )
+            merged = {
+                **op_result_types, **effect_op_result_names([node.effect]),
+            }
+            self._collect_shadowed_qualified_calls(
+                node.body, path, decls_by_name, ctor_to_adt, instances,
+                merged,
+            )
+            return
 
         if (isinstance(node, ast.ModuleCall)
                 and tuple(node.path) == path
                 and node.name in decls_by_name):
             decl = decls_by_name[node.name]
             type_args = self._mono_infer_shadowed(
-                decl, node.args, ctor_to_adt,
+                decl, node.args, ctor_to_adt, op_result_types,
             )
             if type_args is not None:
                 instances[node.name].add(type_args)
@@ -1050,12 +1096,13 @@ class MonomorphizationMixin:
                     continue
                 self._collect_shadowed_qualified_calls(
                     getattr(node, f.name), path, decls_by_name,
-                    ctor_to_adt, instances,
+                    ctor_to_adt, instances, op_result_types,
                 )
         elif isinstance(node, (tuple, list)):
             for item in node:
                 self._collect_shadowed_qualified_calls(
                     item, path, decls_by_name, ctor_to_adt, instances,
+                    op_result_types,
                 )
 
     def _mono_infer_shadowed(
@@ -1063,9 +1110,12 @@ class MonomorphizationMixin:
         decl: ast.FnDecl,
         args: tuple[ast.Expr, ...],
         ctor_to_adt: dict[str, str],
+        op_result_types: dict[str, str] | None = None,
     ) -> tuple[str, ...] | None:
         """Infer a shadowed generic's type args from a qualified call's args."""
         m = Monomorphizer(self._build_mono_context({}, ctor_to_adt))
+        if op_result_types:
+            m._op_result_types = op_result_types
         return m._infer_type_args_from_args(decl, args, ctor_to_adt, None)
 
     def _collect_eq_full_type_names(

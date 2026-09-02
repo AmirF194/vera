@@ -12,7 +12,7 @@ Ordering derives from the design principles ([DESIGN.md](DESIGN.md)): verificati
 
 ## Where we are
 
-12,214 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs — burndown material rather than stage work — plus the *limitations* the stages below retire.
+12,218 tests, 244 conformance programs, 43 examples, 14 spec chapters.  [KNOWN_ISSUES.md](KNOWN_ISSUES.md) tracks the open bugs (burndown material rather than stage work), plus the *limitations* the stages below retire.
 
 ## The v0.1.14 burndown
 
@@ -31,7 +31,7 @@ A bug class outranks stage work, so the next release takes the open `bug`-labell
 | [#1312](https://github.com/aallan/vera/issues/1312) | An entry-file `data` declaration and a module's of the same name silently drop the caller when their shapes differ. |
 | [#1321](https://github.com/aallan/vera/issues/1321) | Codegen tests its container branches before `_adt_layouts`, so a user `data` named after a container is misclassified. |
 | [#1327](https://github.com/aallan/vera/issues/1327) | Monomorphization's type namer has no `IndexExpr` arm, so a generic argument that is an array index drops its caller. |
-| [#1310](https://github.com/aallan/vera/issues/1310) | A module generic instantiated at an effect-operation result type never registers its clone. |
+| [#1357](https://github.com/aallan/vera/issues/1357) | A module generic never discovers an instantiation piped from an effect-operation result — the piped sibling of #1310, failing on both discovery walks. |
 | [#1307](https://github.com/aallan/vera/issues/1307) | The checker resolves a bare call to a sibling function's `where` helper. |
 | [#1298](https://github.com/aallan/vera/issues/1298) | A postcondition may name a `State<T>` the function's effect row never declares. |
 | [#1322](https://github.com/aallan/vera/issues/1322) | A match binding's GC shadow-stack push is never popped, so the stack grows with recursion depth until it traps. |
