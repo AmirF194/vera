@@ -50,7 +50,7 @@ from typing import cast
 
 from lark import Tree
 from vera.codegen.api import WasmTrapError
-from vera.errors import Diagnostic, VeraError
+from vera.errors import Diagnostic, SourceLocation, VeraError
 from vera.introspect import builtins_payload, effects_payload, errors_payload
 from vera.parser import parse
 from vera.transform import transform
@@ -263,17 +263,26 @@ def cmd_check(
             return 1
         print(exc.diagnostic.format(), file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
+        return _internal_error_envelope(
+            path, exc, doing="checking", as_json=as_json,
+            extra={"slot_environments": []} if explain_slots else None)
 
 
 def cmd_verify(path: str, as_json: bool = False, quiet: bool = False,
                timeout_ms: int | None = None) -> int:
     """Parse, transform, type-check, and verify a .vera file."""
-    from vera.checker import typecheck_with_artifacts
-    from vera.resolver import ModuleResolver
-    from vera.smt import resolve_timeout_ms
-    from vera.verifier import verify
-
     try:
+        # INSIDE the try (#1361 review): these are function-scope imports, and
+        # an import that fails — a broken or missing `z3` wheel is the live
+        # case — raises here.  Outside, that raise bypasses the backstop below
+        # and produces exactly the empty stdout plus raw traceback the
+        # envelope exists to eliminate.
+        from vera.checker import typecheck_with_artifacts
+        from vera.resolver import ModuleResolver
+        from vera.smt import resolve_timeout_ms
+        from vera.verifier import verify
+
         p, source, tree = _load_and_parse(path)
         ast = transform(tree)
 
@@ -397,63 +406,97 @@ def cmd_verify(path: str, as_json: bool = False, quiet: bool = False,
             print(f"Verification: {summary_str}")
         return 0
     except FileNotFoundError:
-        if as_json:
-            print(json.dumps({"ok": False, "file": path,
-                              "diagnostics": [{"severity": "error",
-                                               "description": f"file not found: {path}",
-                                               "location": {"line": 0, "column": 0}}],
-                              "warnings": []}, indent=2))
+        # The sibling handlers are inside the backstop's reach too (#1361
+        # review): their own `print`/`json.dumps` can raise — a closed stdout,
+        # a diagnostic that will not serialise — and an unenveloped handler
+        # failing is the same empty stdout as no handler at all.
+        try:
+            if as_json:
+                print(json.dumps({"ok": False, "file": path,
+                                  "diagnostics": [{"severity": "error",
+                                                   "description": f"file not found: {path}",
+                                                   "location": {"line": 0, "column": 0}}],
+                                  "warnings": []}, indent=2))
+                return 1
+            print(f"Error: file not found: {path}", file=sys.stderr)
             return 1
-        print(f"Error: file not found: {path}", file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing="verifying", as_json=as_json)
     except VeraError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "file": path,
-                              "diagnostics": [exc.diagnostic.to_dict()],
-                              "warnings": []}, indent=2))
+        try:
+            if as_json:
+                print(json.dumps({"ok": False, "file": path,
+                                  "diagnostics": [exc.diagnostic.to_dict()],
+                                  "warnings": []}, indent=2))
+                return 1
+            print(exc.diagnostic.format(), file=sys.stderr)
             return 1
-        print(exc.diagnostic.format(), file=sys.stderr)
-        return 1
+        except Exception as inner:  # noqa: BLE001 — envelope backstop
+            return _internal_error_envelope(
+                path, inner, doing="verifying", as_json=as_json)
     except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
         # Every exit path of `verify --json` emits a parseable envelope.
         # Anything reaching here is a compiler bug rather than a property of
         # the program, but a consumer that gets EMPTY stdout cannot tell a
-        # crash from a clean run — it sees no diagnostics either way — so the
-        # machine-readable contract has to hold on the failing path too.  This
-        # is the E699 posture `vera/skip.py` documents for codegen invariants,
-        # applied at the verify entry point: never caught in development,
-        # caught at the top level in production so a raw traceback is not the
-        # user's error report.  #1360 arrived here as a raw
-        # `z3.z3types.Z3Exception: Sort mismatch` from the SMT translator; the
-        # translation defect itself is fixed, and this keeps the NEXT one a
-        # diagnostic rather than a traceback.
-        msg = (
-            f"Internal compiler error while verifying '{path}': "
+        # crash from a clean run — it sees no diagnostics either way.  #1360
+        # arrived here as a raw `z3.z3types.Z3Exception: Sort mismatch` from
+        # the SMT translator; that defect is fixed, and this keeps the NEXT
+        # one a diagnostic rather than a traceback.
+        return _internal_error_envelope(
+            path, exc, doing="verifying", as_json=as_json)
+
+def _internal_error_envelope(
+    path: str, exc: BaseException, *, doing: str, as_json: bool,
+    extra: dict[str, object] | None = None,
+) -> int:
+    """Report an exception that escaped a command as an ``E699`` diagnostic.
+
+    The machine-readable contract is that ``--json`` stdout is ALWAYS a
+    parseable envelope, so a consumer can tell a crash from a clean run: empty
+    stdout looks exactly like "no diagnostics" (#1360).  Anything reaching here
+    is a compiler bug rather than a property of the program, which is the E699
+    posture `vera/skip.py` documents for codegen invariants, applied at the
+    command boundary.
+
+    A real :class:`Diagnostic` rather than a hand-built dict, so the envelope
+    carries the same fields every other diagnostic does — ``source_line``,
+    ``spec_ref`` and the file on the location — and so the text path formats
+    identically to every other error the user sees (PR #1361 review).
+
+    *extra* carries a command's own always-present JSON keys, so its failing
+    envelope keeps the shape its callers parse.
+    """
+    diag = Diagnostic(
+        description=(
+            f"Internal compiler error while {doing} '{path}': "
             f"{type(exc).__name__}: {exc}"
-        )
-        if as_json:
-            print(json.dumps({
-                "ok": False,
-                "file": path,
-                "diagnostics": [{
-                    "severity": "error",
-                    "description": msg,
-                    "location": {"line": 0, "column": 0},
-                    "rationale": "The verifier raised an unexpected exception. "
-                                 "This is a compiler bug, not a property of "
-                                 "the program under verification.",
-                    "fix": "Please file a bug report with the offending "
-                           "program at "
-                           "https://github.com/aallan/vera/issues",
-                    "error_code": "E699",
-                }],
-                "warnings": [],
-            }, indent=2))
-            return 1
-        print(f"Error: {msg}", file=sys.stderr)
-        print("  This is a compiler bug. Please file a report at "
-              "https://github.com/aallan/vera/issues", file=sys.stderr)
+        ),
+        location=SourceLocation(file=path, line=0, column=0),
+        source_line="",
+        rationale=(
+            "The compiler raised an unexpected exception. This is a bug in "
+            "the compiler, not a property of the program being processed — "
+            "the input may well be valid."
+        ),
+        fix=(
+            "Please file a bug report with the offending program at "
+            "https://github.com/aallan/vera/issues"
+        ),
+        spec_ref='Chapter 0, Section 0.5.1 "Diagnostic Structure"',
+        severity="error",
+        error_code="E699",
+    )
+    if as_json:
+        payload: dict[str, object] = {
+            "ok": False, "file": path,
+            "diagnostics": [diag.to_dict()], "warnings": [],
+        }
+        payload.update(extra or {})
+        print(json.dumps(payload, indent=2))
         return 1
+    print(diag.format(), file=sys.stderr)
+    return 1
 
 
 def _report_compile_failure(
@@ -1660,6 +1703,9 @@ def cmd_test(
             return 1
         print(exc.diagnostic.format(), file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 — envelope backstop (#1360)
+        return _internal_error_envelope(
+            path, exc, doing="testing", as_json=as_json)
 
 
 def cmd_fmt(

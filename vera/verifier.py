@@ -122,16 +122,22 @@ def _is_locally_constructed(term: object, sort: object) -> bool:
     were emitted and both arms' obligations self-proved while the compiled
     program trapped (#1332 review round).
 
-    ``any`` rather than ``all`` is the CONSERVATIVE reading, not a measured
-    necessity: the fact is asserted about the whole term unconditionally, so one
-    outstanding arm is in principle enough to discharge that arm's own
-    obligation under its path condition.  Probed directly — a mixed ``ite``
-    (one locally-constructed arm, one produced by a call) over a non-generic
-    single-constructor ADT, where both arms genuinely share a sort — the
-    constructed arm's obligation is refuted under BOTH readings, so no
-    laundering mixed shape was found.  ``any`` is kept because its measured cost
-    is zero (identical shape matrix, identical corpus) and it is the reading
-    that cannot be wrong if such a shape exists.
+    ``any`` rather than ``all`` is a MEASURED necessity, not a preference.  The
+    fact is asserted about the whole term unconditionally, so one outstanding
+    arm is enough to discharge that arm's own obligation under its path
+    condition.  The witness is a mixed ``ite`` over a non-generic
+    single-constructor ADT — both arms genuinely share a sort, so the predicate
+    is actually consulted — with the CONSTRUCTING arm in the ``else``::
+
+        let @Box = if @Int.0 > 100 then { mk(@Int.0) } else { MkBox(@Int.0, 5) };
+
+    Under ``all`` that verifies clean and traps at run time; under ``any`` it is
+    ``violated``/E503.  The arm's position is the whole experiment: put the
+    construction in the ``then`` of ``> 100`` instead and its path condition
+    already implies non-negativity, so the obligation discharges legitimately
+    and the shape can exhibit nothing either way.
+
+    Its measured cost is still zero — identical shape matrix, identical corpus.
 
     Dropping the fact costs nothing where the other arm is grounded: whatever
     grounds it still grounds it directly.

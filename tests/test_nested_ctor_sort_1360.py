@@ -351,3 +351,169 @@ def test_ctor_accepts_still_discriminates_on_real_terms() -> None:
 
 def _ok_arg() -> z3.ExprRef:
     return z3.IntVal(0)
+
+
+# ---------------------------------------------------------------------------
+# 5. The envelope holds on every route into and out of the command
+# ---------------------------------------------------------------------------
+
+def _run_cmd(cmd, path: Path, **kw) -> tuple[int, str, str]:
+    import io
+    import contextlib
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = cmd(str(path), **kw)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_a_failing_import_is_enveloped(tmp_path: Path,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """A function-scope import that raises still yields an envelope.
+
+    `cmd_verify` imports `vera.verifier` (and with it `z3`) inside the
+    function.  Those imports used to sit OUTSIDE the try, so a broken or
+    missing wheel produced empty stdout and a raw traceback — precisely the
+    failure the envelope claims to have eliminated, reachable on any machine
+    whose `z3` install is broken.  Red before the imports moved inside.
+    """
+    import builtins
+    from vera.cli import cmd_verify
+
+    real_import = builtins.__import__
+
+    def hostile(name, *a, **k):
+        if name == "vera.verifier":
+            raise ImportError("libz3.so: cannot open shared object file")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", hostile)
+    src = tmp_path / "i.vera"
+    src.write_text(_program("@Int", "@Int", "@Int.0"), encoding="utf-8")
+    rc, out, _ = _run_cmd(cmd_verify, src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), "stdout was EMPTY — the import bypassed the envelope"
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert "E699" in [d.get("error_code") for d in payload["diagnostics"]]
+    assert "cannot open shared object file" in payload["diagnostics"][0]["description"]
+
+
+def test_a_failing_sibling_handler_is_enveloped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `VeraError` handler's own raise becomes an envelope too.
+
+    An unenveloped handler that fails mid-report emits the same empty stdout
+    as no handler at all, so the sibling handlers are inside the backstop's
+    reach.  Driven by a diagnostic whose `to_dict` raises — the helper builds
+    its OWN diagnostic, so it is unaffected and can still report.
+    """
+    from vera.cli import cmd_verify
+    from vera.errors import VeraError
+
+    class _BadDiagnostic:
+        def to_dict(self):
+            raise RuntimeError("diagnostic will not serialise")
+
+        def format(self) -> str:
+            raise RuntimeError("diagnostic will not format")
+
+    err = VeraError.__new__(VeraError)
+    err.diagnostic = _BadDiagnostic()
+
+    def boom(_path):
+        raise err
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    src = tmp_path / "h.vera"
+    src.write_text("x", encoding="utf-8")
+    rc, out, _ = _run_cmd(cmd_verify, src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), "stdout was EMPTY — the handler's own raise escaped"
+    payload = json.loads(out)
+    assert "E699" in [d.get("error_code") for d in payload["diagnostics"]]
+    assert "will not serialise" in payload["diagnostics"][0]["description"]
+
+
+@pytest.mark.parametrize("cmd_name,doing", [
+    ("cmd_check", "checking"),
+    ("cmd_verify", "verifying"),
+    ("cmd_test", "testing"),
+])
+def test_every_json_command_envelopes_an_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cmd_name: str, doing: str,
+) -> None:
+    """`check`, `verify` and `test` all keep the `--json` contract.
+
+    `verify` had the only backstop; the other two produced empty stdout on an
+    internal error.  The three commands share one shape — a single `try` with
+    the same two handlers — so they share one helper.
+    """
+    import vera.cli as cli_mod
+
+    def boom(_path):
+        raise RuntimeError("synthetic internal failure")
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    src = tmp_path / "e.vera"
+    src.write_text(_program("@Int", "@Int", "@Int.0"), encoding="utf-8")
+    rc, out, _ = _run_cmd(getattr(cli_mod, cmd_name), src, as_json=True)
+
+    assert rc == 1
+    assert out.strip(), f"{cmd_name}: stdout was EMPTY"
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    diag = next(d for d in payload["diagnostics"] if d.get("error_code") == "E699")
+    assert doing in diag["description"], (
+        f"{cmd_name}: envelope names the wrong phase: {diag['description']!r}"
+    )
+    assert "synthetic internal failure" in diag["description"]
+
+
+def test_the_envelope_carries_the_full_diagnostic_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is a real `Diagnostic`, so spec 0.5.1's fields are all present.
+
+    A hand-built dict carried description/location/rationale/fix only, leaving
+    `spec_ref` and the location's `file` absent — the envelope would have been
+    the one diagnostic in the compiler that the field contract did not reach.
+    """
+    from vera.cli import cmd_verify
+
+    def boom(_path):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    src = tmp_path / "f.vera"
+    src.write_text("x", encoding="utf-8")
+    _rc, out, _ = _run_cmd(cmd_verify, src, as_json=True)
+    diag = json.loads(out)["diagnostics"][0]
+
+    assert diag["severity"] == "error"
+    assert diag["error_code"] == "E699"
+    assert diag["rationale"] and diag["fix"] and diag["spec_ref"]
+    assert diag["location"]["file"] == str(src), (
+        "the location names no file — a consumer cannot join it to anything"
+    )
+
+
+def test_the_text_path_formats_like_any_other_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And without `--json` the user gets a formatted diagnostic, not a trace."""
+    from vera.cli import cmd_verify
+
+    def boom(_path):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr("vera.cli._load_and_parse", boom)
+    src = tmp_path / "g.vera"
+    src.write_text("x", encoding="utf-8")
+    rc, _out, err = _run_cmd(cmd_verify, src, as_json=False)
+    assert rc == 1
+    assert "E699" in err
+    assert "Traceback (most recent call last)" not in err

@@ -1594,8 +1594,16 @@ class SmtContext:
             # since `Nat` reads back as `Int` from a Z3 sort but types as `Nat`
             # on the declared side.  `z3.If` raises on that rather than
             # returning an error, which escaped `vera verify` as a bare
-            # traceback.  Declining to translate is the Tier-3 demotion every
-            # other `return None` here already means.
+            # traceback.
+            #
+            # What declining does, measured rather than assumed (PR #1361
+            # review): the enclosing `let` binds an OPAQUE value whose
+            # DECLARED-type fact is still asserted at base level.  Nothing is
+            # demoted to Tier 3 and nothing is warned — a postcondition over
+            # that value can still discharge at Tier 1 while the compiled
+            # program refutes it, which is #1363's class reached through this
+            # route rather than through a disclosed obligation.  So this is a
+            # crash removed, not a soundness guarantee added.
             return None
         return z3.If(cond, then, else_)
 

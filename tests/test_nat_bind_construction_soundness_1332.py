@@ -629,3 +629,85 @@ def test_a_call_produced_scrutinee_keeps_its_facts(
         f"{[d.get('error_code') for d in result['diagnostics']]}"
     )
     assert all(o["status"] != "violated" for o in result["obligations"])
+
+
+# ---------------------------------------------------------------------------
+# 8. The arm reading itself: `any` over the ITE arms, not `all`
+# ---------------------------------------------------------------------------
+
+def test_a_mixed_branch_launders_under_an_all_reading(tmp_path: Path) -> None:
+    """Pins `any` over the ITE arms — nothing else in this file does.
+
+    WHY THE `ite_mixed` CELL ABOVE CANNOT PIN IT.  That shape joins a locally
+    built `Tuple<Int, Int>` with a callee's declared `Tuple<Int, Nat>`; the two
+    are distinct Z3 sorts, so `_translate_if` declines the join and the guard
+    is never reached with a mixed term at all.  It passes under either reading
+    for a reason that has nothing to do with the reading.
+
+    So this cell uses a non-generic single-constructor ADT, where both arms
+    genuinely share one sort and the predicate really is consulted.
+
+    AND THE CONSTRUCTING ARM IS THE `else`.  Under `> 100` in the `then`, the
+    arm's own path condition already implies non-negativity and the obligation
+    discharges legitimately — a fixture structurally incapable of showing
+    laundering, which is the trap the `ite_mixed` comment above warns about.
+    In the `else` the path condition is `@Int.0 <= 100`, which admits the
+    negative.
+
+    Measured: under an `all` reading this verifies clean and then traps; under
+    the shipped `any` it is `violated`/E503.
+    """
+    source = textwrap.dedent("""\
+        private data Box { MkBox(Nat, Int) }
+
+        private fn mk(@Int -> @Box)
+          requires(true) ensures(true) effects(pure)
+        {
+          MkBox(7, 9)
+        }
+
+        public fn f(@Int -> @Int)
+          requires(true) ensures(true) effects(pure)
+        {
+          let @Box = if @Int.0 > 100 then { mk(@Int.0) } else { MkBox(@Int.0, 5) };
+          match @Box.0 { MkBox(@Nat, @Int) -> nat_to_int(@Nat.0) }
+        }
+        """)
+    result = _verify(tmp_path, source, name="box.vera")
+    bind = _sole_nat_bind(result)
+    assert bind["status"] == "violated", (
+        f"the constructing arm's narrowing reported {bind['status']!r} — an "
+        f"`all` reading over the branch arms assumes what it must prove"
+    )
+    assert "E503" in [d.get("error_code") for d in result["diagnostics"]]
+    assert result["ok"] is False
+
+
+def test_the_mixed_branch_traps_when_it_is_believed(tmp_path: Path) -> None:
+    """The other half: the value that makes the `all` reading a false Tier-1.
+
+    Asserted separately from the verdict because the trap is what proves the
+    verdict matters — `-7` reaches the constructed arm and the destructure
+    guard fires.
+    """
+    source = textwrap.dedent("""\
+        private data Box { MkBox(Nat, Int) }
+
+        private fn mk(@Int -> @Box)
+          requires(true) ensures(true) effects(pure)
+        {
+          MkBox(7, 9)
+        }
+
+        public fn f(@Int -> @Int)
+          requires(true) ensures(true) effects(pure)
+        {
+          let @Box = if @Int.0 > 100 then { mk(@Int.0) } else { MkBox(@Int.0, 5) };
+          match @Box.0 { MkBox(@Nat, @Int) -> nat_to_int(@Nat.0) }
+        }
+        """)
+    proc = _run(tmp_path, source, _NEGATIVE, name="box.vera")
+    assert _traps(proc), (
+        f"expected the destructure guard to fire at {_NEGATIVE}\n"
+        f"exit={proc.returncode} stdout={proc.stdout}\nstderr={proc.stderr}"
+    )

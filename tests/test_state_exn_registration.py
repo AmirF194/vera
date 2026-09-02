@@ -1201,12 +1201,13 @@ def test_every_referenced_state_exn_symbol_is_declared() -> None:
     # globally distinct symbols across the corpus is much smaller, and both
     # are floored so neither reading can be quietly gamed.
     #
-    # Re-measured at round 5, after the conformance negatives were filtered
-    # out of the sweep: swept 201, symbol_refs 128, distinct 31, validated 30
-    # (the filter removed 25 programs and one handler-bearing module — a
-    # deliberately-rejected fixture that referenced a family).  Each floor
-    # sits below its measurement with room for ordinary corpus churn, and far
-    # enough above zero that an emptied regex or a vanished corpus fails.
+    # The floors sit far below the live measurement and far above zero, so
+    # ordinary corpus churn never trips one while an emptied regex or a
+    # vanished corpus does.  The live values are deliberately NOT restated
+    # here: they move with every corpus addition, and a quadruple of them in a
+    # comment is stale the moment it is written — each assertion below prints
+    # its own live value in the failure message, which is where a reader who
+    # needs the number is already looking.
     assert swept >= 150, f"only {swept} programs compiled — sweep too small"
     assert symbol_refs >= 90, (
         f"only {symbol_refs} state/exn symbol references summed across "
