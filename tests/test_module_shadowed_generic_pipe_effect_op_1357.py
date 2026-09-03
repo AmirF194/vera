@@ -122,6 +122,55 @@ def test_module_generic_pipe_instantiated_from_effect_op_result(tmp_path) -> Non
     assert module_value(result) == ("ok", 42007)
 
 
+_MLIB13 = """\
+module mlib13;
+
+public forall<T> fn ord9(@T, @T -> @T)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  @T.1
+}
+"""
+
+_MAIN13 = """\
+import mlib13;
+
+public fn main(@Unit -> @Int)
+  requires(true)
+  ensures(true)
+  effects(pure)
+{
+  handle[State<Int>](@Int = 42007) {
+    get(@Unit) -> { resume(@Int.0) },
+    put(@Int) -> { resume(()) }
+  } in {
+    get(()) |> mlib13::ord9(1)
+  }
+}
+"""
+
+
+def test_module_generic_pipe_argument_order_preserved(tmp_path) -> None:
+    """Order-sensitive: ``@T.N`` counts back from the last bound
+    argument (measured directly: for a 2-arg ``fn(@T, @T -> @T)``,
+    ``@T.0`` is the LAST argument and ``@T.1`` is the first), so
+    ``ord9``'s ``@T.1`` returns whichever value the pipe desugar binds
+    FIRST. If the desugar ever appended the piped operand after the
+    explicit argument instead of before it, this would return the
+    explicit ``1`` instead of the piped ``42007``. The unary ``idg7``
+    cell above cannot observe this: with one argument slot, a swapped
+    append is indistinguishable from a correct prepend.
+    """
+    verify_errors, result, cg_errors = build_multi_module(
+        tmp_path, {"mlib13.vera": _MLIB13, "main.vera": _MAIN13},
+    )
+    assert not cg_errors, f"codegen errors: {cg_errors}"
+    assert not verify_errors, f"verify errors: {verify_errors}"
+    assert module_value(result) == ("ok", 42007)
+
+
 def test_shadowed_generic_pipe_effect_op_discovery_differential() -> None:
     """Piped external qualified call: codegen and the verifier must
     discover the identical ``mod$mlib11$idg7`` instantiation from
